@@ -6,20 +6,26 @@ import { useSearchParams } from 'next/navigation';
 import { getAllPrograms } from '@/lib/programs';
 import { getAllPeople } from '@/lib/people';
 import { sendMessageToPerson } from '@/lib/communications';
+import {
+  getBroadcastHistory,
+  recordBroadcastSummary,
+  resolveRecipientsBySegment,
+  segmentLabel,
+} from '@/lib/broadcasts';
 
 import type {
   Program,
   Person,
   CommunicationChannel,
+  BroadcastSegmentKey,
+  BroadcastRecord,
 } from '@/types';
 
 const CURRENT_USER_ID = 'system'; // TODO: replace with real authenticated user ID
 
-type SegmentType = 'all-people' | 'members-only' | 'guests-only';
-
 type BroadcastFormState = {
   programId: string;
-  segment: SegmentType;
+  segment: BroadcastSegmentKey;
   channel: CommunicationChannel;
   messageBody: string;
 };
@@ -29,6 +35,8 @@ export default function BroadcastPage() {
 
   const [programs, setPrograms] = useState<Program[]>([]);
   const [people, setPeople] = useState<Person[]>([]);
+  const [history, setHistory] = useState<BroadcastRecord[]>([]);
+
   const [form, setForm] = useState<BroadcastFormState>({
     programId: '',
     segment: 'all-people',
@@ -40,6 +48,7 @@ export default function BroadcastPage() {
   const [sentCount, setSentCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Initial load
   useEffect(() => {
     const allPrograms = getAllPrograms().sort((a, b) =>
       a.date.localeCompare(b.date),
@@ -52,16 +61,25 @@ export default function BroadcastPage() {
       return aName.localeCompare(bName);
     });
     setPeople(allPeople);
+
+    setHistory(getBroadcastHistory());
   }, []);
 
-  // Initialize programId from query string if present
+  // Selected program
+  const selectedProgram = useMemo(
+    () => programs.find((p) => p.id === form.programId) ?? null,
+    [programs, form.programId],
+  );
+
+  // Pre-select program from ?programId, and auto-build default message once
   useEffect(() => {
     if (!programs.length) return;
-    const qpProgramId = searchParams.get('programId');
 
     setForm((prev) => {
+      // only initialise once
       if (prev.programId) return prev;
 
+      const qpProgramId = searchParams.get('programId');
       const initialProgramId =
         (qpProgramId && programs.some((p) => p.id === qpProgramId)
           ? qpProgramId
@@ -78,23 +96,11 @@ export default function BroadcastPage() {
     });
   }, [programs, searchParams]);
 
-  const selectedProgram = useMemo(
-    () => programs.find((p) => p.id === form.programId) ?? null,
-    [programs, form.programId],
+  // Recipients based on refined segment
+  const targetPeople = useMemo(
+    () => resolveRecipientsBySegment(form.segment, people),
+    [form.segment, people],
   );
-
-  const targetPeople = useMemo(() => {
-    if (!people.length) return [] as Person[];
-    switch (form.segment) {
-      case 'members-only':
-        return people.filter((p) => p.category === 'member');
-      case 'guests-only':
-        return people.filter((p) => p.category === 'guest');
-      case 'all-people':
-      default:
-        return people;
-    }
-  }, [people, form.segment]);
 
   function handleChange(
     e: React.ChangeEvent<HTMLSelectElement | HTMLTextAreaElement>,
@@ -137,7 +143,7 @@ export default function BroadcastPage() {
       : '';
     const locationLabel = program.location ? ` at ${program.location}` : '';
 
-    return `Dear {{firstName}}, you are specially invited to "${program.name}" on ${dateLabel}${timeLabel ? ` at ${timeLabel}` : ''}${locationLabel}. We look forward to seeing you!`;
+    return `Dear {{firstName}}, you are specially invited to "{{programName}}" on ${dateLabel}${timeLabel ? ` at ${timeLabel}` : ''}${locationLabel}. We look forward to seeing you!`;
   }
 
   function validate(): string | null {
@@ -161,8 +167,13 @@ export default function BroadcastPage() {
     setSending(true);
     try {
       let successCount = 0;
+
       for (const person of targetPeople) {
-        const personalizedBody = personalizeMessage(form.messageBody, person, selectedProgram);
+        const personalizedBody = personalizeMessage(
+          form.messageBody,
+          person,
+          selectedProgram,
+        );
 
         const result = await sendMessageToPerson({
           personId: person.id,
@@ -181,9 +192,27 @@ export default function BroadcastPage() {
         }
       }
 
+      const failureCount = targetPeople.length - successCount;
       setSentCount(successCount);
+
+      // Record summary in history
+      recordBroadcastSummary({
+        programId: form.programId || undefined,
+        channel: form.channel,
+        segmentKey: form.segment,
+        messageBody: form.messageBody,
+        totalTargets: targetPeople.length,
+        successCount,
+        failureCount,
+        createdByUserId: CURRENT_USER_ID,
+      });
+
+      setHistory(getBroadcastHistory());
+
       if (successCount === 0) {
-        setError('No messages were successfully sent. Please check your provider config.');
+        setError(
+          'No messages were successfully sent. Please check your provider config.',
+        );
       }
     } catch (err: unknown) {
       const e = err as Error;
@@ -202,7 +231,7 @@ export default function BroadcastPage() {
         </h1>
         <p className="mt-1 text-sm text-slate-500">
           Send program-based messages via WhatsApp, SMS, or Email to members, guests,
-          or everyone.
+          or workforce segments.
         </p>
       </div>
 
@@ -224,7 +253,10 @@ export default function BroadcastPage() {
 
       {/* Form */}
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <form className="grid gap-4 md:grid-cols-[1.2fr,1.8fr]" onSubmit={handleSubmit}>
+        <form
+          className="grid gap-4 md:grid-cols-[1.2fr,1.8fr]"
+          onSubmit={handleSubmit}
+        >
           {/* Left column: configuration */}
           <div className="space-y-4 border-b border-slate-100 pb-4 md:border-b-0 md:border-r md:pb-0 md:pr-4 dark:border-slate-800">
             {/* Program */}
@@ -264,13 +296,34 @@ export default function BroadcastPage() {
                 onChange={handleChange}
                 className="mt-1 w-full rounded-md border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-700"
               >
-                <option value="all-people">All people (members + guests)</option>
-                <option value="members-only">Members only</option>
-                <option value="guests-only">Guests only</option>
+                <optgroup label="All">
+                  <option value="all-people">
+                    All people (members + guests)
+                  </option>
+                </optgroup>
+
+                <optgroup label="Members">
+                  <option value="members-all">All members</option>
+                  <option value="members-regular">Regular members</option>
+                  <option value="members-adherent">Adherent members</option>
+                  <option value="members-returning">Returning members</option>
+                  <option value="members-visiting">Visiting members</option>
+                </optgroup>
+
+                <optgroup label="Guests">
+                  <option value="guests-all">All guests</option>
+                  <option value="guests-first-time">First-time guests</option>
+                  <option value="guests-returning">Returning guests</option>
+                  <option value="guests-regular">Regular guests</option>
+                </optgroup>
+
+                <optgroup label="Workforce">
+                  <option value="workers-all">All workforce (workers)</option>
+                </optgroup>
               </select>
               <p className="mt-1 text-[11px] text-slate-500">
-                {targetPeople.length} recipient{targetPeople.length === 1 ? '' : 's'}{' '}
-                currently match this segment.
+                {targetPeople.length} recipient
+                {targetPeople.length === 1 ? '' : 's'} currently match this segment.
               </p>
             </div>
 
@@ -354,6 +407,62 @@ export default function BroadcastPage() {
           </div>
         </form>
       </div>
+
+      {/* History */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+          Broadcast history
+        </h2>
+
+        {history.length === 0 ? (
+          <p className="mt-2 text-xs text-slate-500">
+            No broadcasts have been sent yet.
+          </p>
+        ) : (
+          <div className="mt-3 max-h-[260px] overflow-y-auto rounded-md border border-slate-100 text-xs dark:border-slate-800">
+            <table className="min-w-full text-left">
+              <thead>
+                <tr className="bg-slate-50 text-[11px] text-slate-500 dark:bg-slate-900/40">
+                  <th className="px-3 py-2 font-medium">Date</th>
+                  <th className="px-3 py-2 font-medium">Program</th>
+                  <th className="px-3 py-2 font-medium">Segment</th>
+                  <th className="px-3 py-2 font-medium">Channel</th>
+                  <th className="px-3 py-2 font-medium">Sent / Targets</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((record) => {
+                  const program = record.programId
+                    ? programs.find((p) => p.id === record.programId) ?? null
+                    : null;
+                  return (
+                    <tr
+                      key={record.id}
+                      className="border-t border-slate-100 hover:bg-slate-50/60 dark:border-slate-800 dark:hover:bg-slate-900/50"
+                    >
+                      <td className="px-3 py-2 text-slate-700 dark:text-slate-100">
+                        {formatDateTime(record.createdAt)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
+                        {program ? program.name : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
+                        {segmentLabel(record.segmentKey)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
+                        {channelLabel(record.channel)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-700 dark:text-slate-100">
+                        {record.successCount}/{record.totalTargets}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -370,16 +479,16 @@ function formatDate(iso: string): string {
   });
 }
 
-function segmentLabel(segment: SegmentType): string {
-  switch (segment) {
-    case 'members-only':
-      return 'Members only';
-    case 'guests-only':
-      return 'Guests only';
-    case 'all-people':
-    default:
-      return 'All people';
-  }
+function formatDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function channelLabel(channel: CommunicationChannel): string {
@@ -403,7 +512,10 @@ function personalizeMessage(
   person: Person,
   program: Program | null,
 ): string {
-  const fullName = `${person.personalData.firstName} ${person.personalData.lastName}`.trim();
+  const fullName = `${person.personalData.firstName ?? ''} ${
+    person.personalData.lastName ?? ''
+  }`.trim();
+
   const replacements: Record<string, string> = {
     '{{firstName}}': person.personalData.firstName ?? '',
     '{{lastName}}': person.personalData.lastName ?? '',
