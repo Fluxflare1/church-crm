@@ -26,7 +26,7 @@ export function getItem<T>(key: string, defaultValue: T): T {
   try {
     return JSON.parse(raw) as T;
   } catch {
-    // Corrupted or incompatible data; reset to default
+    // Data corrupted or incompatible; clean up and return default
     storage.removeItem(namespacedKey);
     return defaultValue;
   }
@@ -40,7 +40,7 @@ export function setItem<T>(key: string, value: T): void {
   try {
     storage.setItem(namespacedKey, JSON.stringify(value));
   } catch {
-    // Quota exceeded or serialization error; fail silently
+    // Quota exceeded or serialization error; fail silently to avoid breaking UX
   }
 }
 
@@ -52,12 +52,12 @@ export function removeItem(key: string): void {
   try {
     storage.removeItem(namespacedKey);
   } catch {
-    // Ignore
+    // Ignore errors
   }
 }
 
 /**
- * Clears ONLY church-crm keys, not entire localStorage.
+ * Clears ONLY church-crm keys, not the entire localStorage.
  */
 export function clearAllAppData(): void {
   const storage = getStorage();
