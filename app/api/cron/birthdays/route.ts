@@ -1,3 +1,5 @@
+// app/api/cron/birthdays/route.ts
+
 import { NextResponse } from 'next/server';
 import { runBirthdayAutomation } from '@/lib/birthdays';
 
