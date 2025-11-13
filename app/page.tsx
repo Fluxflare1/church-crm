@@ -35,3 +35,4 @@ export default function AdminDashboard() {
     </div>
   );
 }
+import { UpcomingBirthdaysCard } from '@/components/dashboard/upcoming-birthdays-card';
