@@ -138,3 +138,24 @@ export default function FollowUpsPage() {
     </div>
   );
 }
+
+
+import { FollowUpBoard } from '@/components/follow-ups/follow-up-board';
+
+export default function FollowUpsPage() {
+  return (
+    <div className="p-6 space-y-4">
+      <div>
+        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+          Follow-ups
+        </h1>
+        <p className="mt-1 text-sm text-slate-500">
+          View and manage follow-ups from guest visits, absentee detection, birthdays,
+          and other workflows.
+        </p>
+      </div>
+
+      <FollowUpBoard />
+    </div>
+  );
+}
