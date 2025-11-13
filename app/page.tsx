@@ -16,3 +16,19 @@ export default function DashboardPage() {
     </div>
   );
 }
+
+// Example: in app/admin/page.tsx or app/page.tsx
+
+import { useEffect } from 'react';
+
+export default function AdminDashboardPage() {
+  useEffect(() => {
+    void fetch('/api/cron/birthdays').catch(() => {});
+  }, []);
+
+  return (
+    <div className="p-6">
+      {/* your dashboard content */}
+    </div>
+  );
+}
