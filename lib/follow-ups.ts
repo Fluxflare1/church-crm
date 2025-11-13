@@ -8,9 +8,11 @@ import {
   getSystemConfig,
   getUsers,
   getPeople,
+  db,
 } from './database';
 
 import { detectAbsenteesForConfiguredWindow } from './attendance';
+import { getAllPrograms } from './programs';
 
 import type {
   FollowUp,
@@ -20,6 +22,10 @@ import type {
   FollowUpActionLogEntry,
   Person,
   User,
+  AttendanceRecord,
+  FollowUpRecord,
+  FollowUpType,
+  Program,
 } from '@/types';
 
 function nowIso(): string {
@@ -35,7 +41,7 @@ function generateId(prefix: string): string {
 
 export interface CreateFollowUpInput {
   personId: string;
-  type: string;                       // "new-guest", "returning-guest", "absentee", "birthday", etc.
+  type: string; // "new-guest", "returning-guest", "absentee", "birthday", etc.
   priority: FollowUpPriority;
   dueInHours: number;
   createdByUserId: string;
@@ -52,9 +58,7 @@ export interface UpdateFollowUpStatusInput {
 // ---- Helpers: users & assignment --------------------------------------------
 
 function getActiveRms(): User[] {
-  return getUsers().filter(
-    (u) => u.isActive && u.roles.includes('RM')
-  );
+  return getUsers().filter((u) => u.isActive && u.roles.includes('RM'));
 }
 
 /**
@@ -212,6 +216,10 @@ export function createFollowUpForNewGuest(options: {
   personId: string;
   createdByUserId: string;
   notes?: string;
+}: {
+  personId: string;
+  createdByUserId: string;
+  notes?: string;
 }): FollowUp {
   const config = getSystemConfig();
   const hours = config.followUp.timeframes.newGuestHours;
@@ -265,7 +273,7 @@ export function createFollowUpForRegularGuest(options: {
   });
 }
 
-// ---- Absentee auto follow-ups -----------------------------------------------
+// ---- Absentee auto follow-ups (via attendance helper) ----------------------
 
 /**
  * Generate absentee follow-ups based on SystemConfig.followUp.absenteeRule
@@ -319,6 +327,248 @@ export function generateAbsenteeFollowUpsForConfiguredWindow(options: {
   }
 
   return created;
+}
+
+// -----------------------------------------------------------------------------
+// Absentee detection automation (direct window scan)
+// -----------------------------------------------------------------------------
+
+export interface AbsenteeDetectionResult {
+  processedPeople: number;
+  consideredPeople: number;
+  createdFollowUps: number;
+  skipped: boolean;
+  reason?: string;
+}
+
+/**
+ * Run absentee detection according to SystemConfig.followUp.absenteeRule.
+ * This is designed to be called by a "cron-like" endpoint or on-login/on-open.
+ *
+ * Logic (high level):
+ * - Look at programs within absenteeRule.withinDays of referenceDate.
+ * - For each person whose category is "member" OR regular guest:
+ *   - If they have historical attendance, but have missed at least
+ *     absenteeRule.missedProgramsCount programs in this window,
+ *     create an "absentee" follow-up if one isn't already open.
+ */
+export function runAbsenteeDetection(
+  referenceDate: Date = new Date()
+): AbsenteeDetectionResult {
+  const config = getSystemConfig();
+
+  if (!config.followUp.enabled) {
+    return {
+      processedPeople: 0,
+      consideredPeople: 0,
+      createdFollowUps: 0,
+      skipped: true,
+      reason: 'Follow-up module disabled in SystemConfig.',
+    };
+  }
+
+  const rule = config.followUp.absenteeRule;
+  if (!rule.enabled) {
+    return {
+      processedPeople: 0,
+      consideredPeople: 0,
+      createdFollowUps: 0,
+      skipped: true,
+      reason: 'Absentee rule disabled in SystemConfig.followUp.',
+    };
+  }
+
+  const withinDays = rule.withinDays || 0;
+  if (withinDays <= 0 || rule.missedProgramsCount <= 0) {
+    return {
+      processedPeople: 0,
+      consideredPeople: 0,
+      createdFollowUps: 0,
+      skipped: true,
+      reason: 'Absentee rule misconfigured (withinDays/missedProgramsCount).',
+    };
+  }
+
+  const ref = stripTime(referenceDate);
+  const start = addDays(ref, -withinDays);
+
+  const allPrograms = getAllPrograms();
+  const windowPrograms = filterProgramsByWindow(allPrograms, start, ref);
+
+  if (!windowPrograms.length) {
+    return {
+      processedPeople: 0,
+      consideredPeople: 0,
+      createdFollowUps: 0,
+      skipped: true,
+      reason: 'No programs found in absentee window.',
+    };
+  }
+
+  const programIds = new Set(windowPrograms.map((p) => p.id));
+
+  // Read all attendance records from DB
+  const attendanceRecords = db.getTable<AttendanceRecord>('attendance') ?? [];
+
+  // Pre-index attendance for quick lookup
+  const byPerson = buildAttendanceIndex(attendanceRecords);
+
+  const allPeople = getPeople();
+  let processed = 0;
+  let considered = 0;
+  let created = 0;
+
+  // We will also look at existing follow-ups to avoid duplicates
+  const followUps = db.getTable<FollowUpRecord>('followUps') ?? [];
+
+  for (const person of allPeople) {
+    processed++;
+
+    if (!isPersonEligibleForAbsenteeRule(person)) {
+      continue;
+    }
+    considered++;
+
+    const personAttendance = byPerson.get(person.id) ?? new Set<string>();
+
+    // Historical attendance check (to avoid brand-new people being marked absent)
+    const hasEverAttended = hasAnyAttendance(personAttendance);
+    if (!hasEverAttended) {
+      continue;
+    }
+
+    const missed = countMissedPrograms(programIds, personAttendance);
+    if (missed < rule.missedProgramsCount) {
+      continue;
+    }
+
+    // Avoid duplicate open absentee follow-ups
+    const hasOpenAbsentee = followUps.some(
+      (fu) =>
+        fu.personId === person.id &&
+        fu.type === (rule.followUpType as FollowUpType) &&
+        fu.status !== 'resolved'
+    );
+    if (hasOpenAbsentee) {
+      continue;
+    }
+
+    const dueAt = new Date(
+      ref.getTime() + (config.followUp.timeframes.absenteeHours || 0) * 60 * 60 * 1000
+    );
+
+    const type = (rule.followUpType as FollowUpType) || ('absentee' as FollowUpType);
+    const priority = (rule.followUpPriority as FollowUpPriority) || 'medium';
+
+    const newFollowUp: FollowUpRecord = {
+      id: crypto.randomUUID(),
+      personId: person.id,
+      type,
+      reason: 'absentee-rule',
+      priority,
+      status: 'open',
+      createdAt: new Date().toISOString(),
+      dueAt: dueAt.toISOString(),
+      assignedRmUserId: person.relationship.primaryRmUserId ?? null,
+      metadata: {
+        missedPrograms: missed,
+        windowDays: withinDays,
+      },
+    };
+
+    followUps.push(newFollowUp);
+    created++;
+  }
+
+  if (created > 0) {
+    db.setTable<FollowUpRecord>('followUps', followUps);
+  }
+
+  return {
+    processedPeople: processed,
+    consideredPeople: considered,
+    createdFollowUps: created,
+    skipped: false,
+  };
+}
+
+// ----------------- helpers (absentee detection) ------------------------------
+
+function stripTime(d: Date): Date {
+  const copy = new Date(d);
+  copy.setHours(0, 0, 0, 0);
+  return copy;
+}
+
+function addDays(d: Date, delta: number): Date {
+  const copy = new Date(d);
+  copy.setDate(copy.getDate() + delta);
+  return copy;
+}
+
+function filterProgramsByWindow(
+  programs: Program[],
+  start: Date,
+  end: Date
+): Program[] {
+  const startISO = start.toISOString();
+  const endISO = end.toISOString();
+  return programs.filter((p) => {
+    const date = p.date || p.startAt;
+    if (!date) return false;
+    const iso = new Date(date).toISOString();
+    return iso >= startISO && iso <= endISO;
+  });
+}
+
+function buildAttendanceIndex(
+  records: AttendanceRecord[]
+): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  for (const rec of records) {
+    if (!rec.personId || !rec.programId) continue;
+    if (!map.has(rec.personId)) {
+      map.set(rec.personId, new Set());
+    }
+    map.get(rec.personId)!.add(rec.programId);
+  }
+  return map;
+}
+
+function hasAnyAttendance(programSet: Set<string>): boolean {
+  return programSet.size > 0;
+}
+
+function countMissedPrograms(
+  programIds: Set<string>,
+  attendedProgramIds: Set<string>
+): number {
+  let missed = 0;
+  for (const pid of programIds) {
+    if (!attendedProgramIds.has(pid)) {
+      missed++;
+    }
+  }
+  return missed;
+}
+
+/**
+ * Decide who the absentee rule applies to.
+ * Typically:
+ * - Members (including Member + Workforce)
+ * - Regular guests (people in the pipeline).
+ */
+function isPersonEligibleForAbsenteeRule(person: Person): boolean {
+  if (person.category === 'member') {
+    return true;
+  }
+
+  if (person.category === 'guest') {
+    const t = person.evolution.guestType;
+    return t === 'regular' || t === 'returning';
+  }
+
+  return false;
 }
 
 // ---- Utilities --------------------------------------------------------------
