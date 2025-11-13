@@ -1,11 +1,11 @@
-// lib/birthdays.ts
+// lib/birthday.ts
 
 import { getSystemConfig } from './config';
 import { getAllPeople } from './people';
 import { db } from './database';
 import { sendMessageToPerson } from './communications';
 
-import type { Person, CommunicationChannel } from '@/types';
+import type { Person, CommunicationChannel, FollowUpRecord } from '@/types';
 
 export interface BirthdayAutomationResult {
   processedPeople: number;
@@ -59,8 +59,6 @@ export function runBirthdayAutomation(
 
   const allPeople = getAllPeople();
   const logs = db.getTable<BirthdayLog>('birthdayLogs') ?? [];
-
-  type FollowUpRecord = import('@/types').FollowUpRecord;
   const followUps = db.getTable<FollowUpRecord>('followUps') ?? [];
 
   let processed = 0;
@@ -158,7 +156,7 @@ export function runBirthdayAutomation(
 }
 
 // -----------------------------------------------------------------------------
-// Upcoming birthdays helper for dashboard
+// Upcoming birthdays helper for dashboard cards
 // -----------------------------------------------------------------------------
 
 export interface UpcomingBirthday {
