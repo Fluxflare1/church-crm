@@ -58,21 +58,19 @@ function saveBroadcasts(list: BroadcastRecord[]): void {
 /*  Public API: History                                                       */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Returns broadcast history, newest first.
- */
 export function getBroadcastHistory(): BroadcastRecord[] {
   const list = loadBroadcasts();
   return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-/**
- * Records a summary entry for a broadcast that has just been sent.
- */
 export function recordBroadcastSummary(input: {
   programId?: string;
   channel: CommunicationChannel;
   segmentKey: BroadcastSegmentKey;
+  /**
+   * Optional template identifier that was used as the base for this message.
+   */
+  templateId?: string;
   messageBody: string;
   totalTargets: number;
   successCount: number;
@@ -87,6 +85,7 @@ export function recordBroadcastSummary(input: {
     programId: input.programId,
     channel: input.channel,
     segmentKey: input.segmentKey,
+    templateId: input.templateId,
     messageBody: input.messageBody,
     totalTargets: input.totalTargets,
     successCount: input.successCount,
@@ -104,14 +103,6 @@ export function recordBroadcastSummary(input: {
 /*  Public API: Segment resolution                                            */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Resolves a broadcast segment key into a list of persons.
- * This honours:
- * - category: 'guest' | 'member'
- * - evolution.guestType: 'first-time' | 'returning' | 'regular'
- * - evolution.memberRating: 'regular' | 'adherent' | 'returning' | 'visiting'
- * - engagement.isWorker (workforce)
- */
 export function resolveRecipientsBySegment(
   segmentKey: BroadcastSegmentKey,
   peopleOverride?: Person[],
@@ -122,7 +113,6 @@ export function resolveRecipientsBySegment(
     case 'all-people':
       return people;
 
-    // Members
     case 'members-all':
       return people.filter((p) => p.category === 'member');
 
@@ -154,7 +144,6 @@ export function resolveRecipientsBySegment(
           p.evolution?.memberRating === 'visiting',
       );
 
-    // Guests
     case 'guests-all':
       return people.filter((p) => p.category === 'guest');
 
@@ -179,7 +168,6 @@ export function resolveRecipientsBySegment(
           p.evolution?.guestType === 'regular',
       );
 
-    // Workforce
     case 'workers-all':
       return people.filter((p) => p.engagement?.isWorker === true);
 
