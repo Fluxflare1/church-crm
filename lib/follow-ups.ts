@@ -1,583 +1,222 @@
 'use client';
 
-import {
-  getFollowUps as dbGetFollowUps,
-  saveFollowUps as dbSaveFollowUps,
-  addFollowUpAction as dbAddFollowUpAction,
-  getFollowUpActions as dbGetFollowUpActions,
-  getSystemConfig,
-  getUsers,
-  getPeople,
-  db,
-} from './database';
-
-import { detectAbsenteesForConfiguredWindow } from './attendance';
-import { getAllPrograms } from './programs';
+import { nanoid } from 'nanoid';
+import { getAllPeople } from './people';
+import { getSystemConfig } from './config';
 
 import type {
   FollowUp,
   FollowUpStatus,
-  FollowUpPriority,
-  FollowUpChannel,
-  FollowUpActionLogEntry,
-  Person,
-  User,
-  AttendanceRecord,
-  FollowUpRecord,
   FollowUpType,
-  Program,
+  Person,
+  SystemConfig,
 } from '@/types';
 
-function nowIso(): string {
-  return new Date().toISOString();
+const STORAGE_KEY = 'church-crm:follow-ups';
+
+let inMemoryFollowUps: FollowUp[] = [];
+
+/* -------------------------------------------------------------------------- */
+/*  Storage helpers                                                           */
+/* -------------------------------------------------------------------------- */
+
+function loadFollowUps(): FollowUp[] {
+  if (typeof window === 'undefined') {
+    return inMemoryFollowUps;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      inMemoryFollowUps = [];
+      return inMemoryFollowUps;
+    }
+    const parsed = JSON.parse(raw) as FollowUp[];
+    if (!Array.isArray(parsed)) {
+      inMemoryFollowUps = [];
+      return inMemoryFollowUps;
+    }
+    inMemoryFollowUps = parsed;
+    return inMemoryFollowUps;
+  } catch {
+    inMemoryFollowUps = [];
+    return inMemoryFollowUps;
+  }
 }
 
-function generateId(prefix: string): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return `${prefix}_${crypto.randomUUID()}`;
+function saveFollowUps(list: FollowUp[]): void {
+  inMemoryFollowUps = list;
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // best-effort
   }
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Public API: basic operations                                              */
+/* -------------------------------------------------------------------------- */
+
+export function getAllFollowUps(): FollowUp[] {
+  const all = loadFollowUps();
+  return [...all].sort((a, b) => {
+    const aDate = a.createdAt ?? '';
+    const bDate = b.createdAt ?? '';
+    return bDate.localeCompare(aDate);
+  });
+}
+
+export function getFollowUpsForPerson(personId: string): FollowUp[] {
+  return getAllFollowUps().filter((f) => f.personId === personId);
+}
+
+export function upsertFollowUp(followUp: FollowUp): FollowUp {
+  const list = loadFollowUps();
+  const idx = list.findIndex((f) => f.id === followUp.id);
+  if (idx >= 0) {
+    list[idx] = followUp;
+  } else {
+    list.push(followUp);
+  }
+  saveFollowUps(list);
+  return followUp;
+}
+
+export function updateFollowUpStatus(
+  followUpId: string,
+  status: FollowUpStatus,
+  note?: string,
+): FollowUp | null {
+  const list = loadFollowUps();
+  const idx = list.findIndex((f) => f.id === followUpId);
+  if (idx === -1) return null;
+
+  const now = new Date().toISOString();
+
+  const updated: FollowUp = {
+    ...list[idx],
+    status,
+    updatedAt: now,
+    closedAt: status === 'completed' || status === 'cancelled' ? now : undefined,
+    notes:
+      note && note.trim()
+        ? [...(list[idx].notes ?? []), { createdAt: now, text: note.trim() }]
+        : list[idx].notes,
+  };
+
+  list[idx] = updated;
+  saveFollowUps(list);
+  return updated;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public API: creation helpers                                              */
+/* -------------------------------------------------------------------------- */
 
 export interface CreateFollowUpInput {
   personId: string;
-  type: string; // "new-guest", "returning-guest", "absentee", "birthday", etc.
-  priority: FollowUpPriority;
-  dueInHours: number;
+  type: FollowUpType;
+  title: string;
+  description?: string;
+  dueAt?: string; // ISO
+  priority?: 'low' | 'medium' | 'high';
   createdByUserId: string;
-  preferredChannel?: FollowUpChannel;
-  notes?: string;
-}
-
-export interface UpdateFollowUpStatusInput {
-  followUpId: string;
-  status: FollowUpStatus;
-  completedAtIso?: string;
-}
-
-// ---- Helpers: users & assignment --------------------------------------------
-
-function getActiveRms(): User[] {
-  return getUsers().filter((u) => u.isActive && u.roles.includes('RM'));
-}
-
-/**
- * Assign according to SystemConfig.followUp.assignment.
- * - round-robin: hash-based distribution using personId
- * - fixed-rm: use defaultRmUserId if set
- * - by-cell: try Person.assignment.primaryRmUserId first
- * - none: returns undefined
- */
-function chooseAssignedUserId(person: Person): string | undefined {
-  const config = getSystemConfig();
-  const assignmentConfig = config.followUp.assignment;
-  const mode = assignmentConfig.defaultAssignmentMode;
-
-  const rms = getActiveRms();
-  if (!rms.length) return undefined;
-
-  if (mode === 'fixed-rm' && assignmentConfig.defaultRmUserId) {
-    const exists = rms.some((u) => u.id === assignmentConfig.defaultRmUserId);
-    return exists ? assignmentConfig.defaultRmUserId : rms[0].id;
-  }
-
-  if (mode === 'by-cell') {
-    if (person.assignment.primaryRmUserId) {
-      const candidate = rms.find((u) => u.id === person.assignment.primaryRmUserId);
-      if (candidate) return candidate.id;
-    }
-    return rms[0].id;
-  }
-
-  if (mode === 'round-robin') {
-    const hash = Math.abs(hashString(person.id));
-    const index = hash % rms.length;
-    return rms[index].id;
-  }
-
-  // mode === 'none'
-  return undefined;
-}
-
-function hashString(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i);
-    hash |= 0; // Convert to 32-bit integer
-  }
-  return hash;
-}
-
-// ---- Core CRUD --------------------------------------------------------------
-
-export function getAllFollowUps(): FollowUp[] {
-  return dbGetFollowUps();
-}
-
-export function getFollowUpById(followUpId: string): FollowUp | undefined {
-  return dbGetFollowUps().find((f) => f.id === followUpId);
-}
-
-export function getOpenFollowUps(): FollowUp[] {
-  return dbGetFollowUps().filter(
-    (f) => f.status === 'open' || f.status === 'in-progress'
-  );
+  assignedToUserId?: string;
+  programId?: string;
+  meta?: Record<string, any>;
 }
 
 export function createFollowUp(input: CreateFollowUpInput): FollowUp {
-  const people = getPeople();
-  const person = people.find((p) => p.id === input.personId);
-  if (!person) {
-    throw new Error('Person not found.');
-  }
-
-  const now = nowIso();
-  const dueDate = computeDueDate(now, input.dueInHours);
-
-  const assignedToUserId = chooseAssignedUserId(person);
+  const now = new Date().toISOString();
 
   const followUp: FollowUp = {
-    id: generateId('fu'),
+    id: nanoid(),
     personId: input.personId,
     type: input.type,
-    priority: input.priority,
+    title: input.title,
+    description: input.description,
     status: 'open',
-    dueDate,
-    completedAt: undefined,
+    priority: input.priority ?? 'medium',
     createdAt: now,
+    updatedAt: now,
+    dueAt: input.dueAt,
     createdByUserId: input.createdByUserId,
-    assignedToUserId,
-    preferredChannel: input.preferredChannel,
-    notes: input.notes ?? '',
+    assignedToUserId: input.assignedToUserId,
+    programId: input.programId,
+    meta: input.meta ?? {},
   };
 
-  const all = dbGetFollowUps();
-  all.push(followUp);
-  dbSaveFollowUps(all);
+  const list = loadFollowUps();
+  list.push(followUp);
+  saveFollowUps(list);
 
   return followUp;
 }
 
-export function updateFollowUpStatus(input: UpdateFollowUpStatusInput): FollowUp | null {
-  const all = dbGetFollowUps();
-  const idx = all.findIndex((f) => f.id === input.followUpId);
-  if (idx === -1) return null;
+/* -------------------------------------------------------------------------- */
+/*  Absentee automation helpers                                               */
+/* -------------------------------------------------------------------------- */
 
-  const now = nowIso();
-  const existing = all[idx];
-
-  const updated: FollowUp = {
-    ...existing,
-    status: input.status,
-    completedAt:
-      input.status === 'completed'
-        ? input.completedAtIso ?? now
-        : existing.completedAt,
-  };
-
-  all[idx] = updated;
-  dbSaveFollowUps(all);
-
-  return updated;
+export interface AbsenteeDetected {
+  person: Person;
+  missedPrograms: string[]; // programIds
 }
-
-// ---- Follow-up action logs --------------------------------------------------
-
-export interface LogFollowUpActionInput {
-  followUpId: string;
-  channel: FollowUpChannel;
-  outcome: string;
-  createdByUserId: string;
-}
-
-export function logFollowUpAction(input: LogFollowUpActionInput): FollowUpActionLogEntry {
-  const now = nowIso();
-
-  const entry: FollowUpActionLogEntry = {
-    id: generateId('fua'),
-    followUpId: input.followUpId,
-    timestamp: now,
-    channel: input.channel,
-    outcome: input.outcome,
-    createdByUserId: input.createdByUserId,
-  };
-
-  dbAddFollowUpAction(entry);
-  return entry;
-}
-
-export function getActionsForFollowUp(followUpId: string): FollowUpActionLogEntry[] {
-  return dbGetFollowUpActions().filter((a) => a.followUpId === followUpId);
-}
-
-// ---- High-level helpers (new/returning/regular guest) -----------------------
-
-export function createFollowUpForNewGuest(options: {
-  personId: string;
-  createdByUserId: string;
-  notes?: string;
-}: {
-  personId: string;
-  createdByUserId: string;
-  notes?: string;
-}): FollowUp {
-  const config = getSystemConfig();
-  const hours = config.followUp.timeframes.newGuestHours;
-
-  return createFollowUp({
-    personId: options.personId,
-    type: 'new-guest',
-    priority: 'high',
-    dueInHours: hours,
-    createdByUserId: options.createdByUserId,
-    preferredChannel: 'whatsapp',
-    notes: options.notes,
-  });
-}
-
-export function createFollowUpForReturningGuest(options: {
-  personId: string;
-  createdByUserId: string;
-  notes?: string;
-}): FollowUp {
-  const config = getSystemConfig();
-  const hours = config.followUp.timeframes.returningGuestHours;
-
-  return createFollowUp({
-    personId: options.personId,
-    type: 'returning-guest',
-    priority: 'medium',
-    dueInHours: hours,
-    createdByUserId: options.createdByUserId,
-    preferredChannel: 'whatsapp',
-    notes: options.notes,
-  });
-}
-
-export function createFollowUpForRegularGuest(options: {
-  personId: string;
-  createdByUserId: string;
-  notes?: string;
-}): FollowUp {
-  const config = getSystemConfig();
-  const hours = config.followUp.timeframes.regularGuestHours;
-
-  return createFollowUp({
-    personId: options.personId,
-    type: 'regular-guest',
-    priority: 'medium',
-    dueInHours: hours,
-    createdByUserId: options.createdByUserId,
-    preferredChannel: 'whatsapp',
-    notes: options.notes,
-  });
-}
-
-// ---- Absentee auto follow-ups (via attendance helper) ----------------------
 
 /**
- * Generate absentee follow-ups based on SystemConfig.followUp.absenteeRule
- * and detectAbsenteesForConfiguredWindow().
- *
- * It will NOT create duplicates for the same person & type if an open
- * absentee follow-up already exists.
+ * For each absentee, create a follow-up according to FollowUpConfig.absenteeRule.
  */
-export function generateAbsenteeFollowUpsForConfiguredWindow(options: {
-  createdByUserId: string;
-}): FollowUp[] {
-  const config = getSystemConfig();
-  const absenteeRule = config.followUp.absenteeRule;
-  if (!absenteeRule.enabled || !absenteeRule.createFollowUp) {
+export function createAbsenteeFollowUps(
+  absentees: AbsenteeDetected[],
+  options: { createdByUserId: string },
+): FollowUp[] {
+  if (!absentees.length) return [];
+
+  const cfg: SystemConfig = getSystemConfig();
+  const rule = cfg.followUp.absenteeRule;
+
+  if (!rule.enabled || !rule.createFollowUp) {
     return [];
   }
 
-  const detections = detectAbsenteesForConfiguredWindow();
-  if (!detections.length) return [];
-
-  const allFollowUps = dbGetFollowUps();
+  const now = new Date();
   const created: FollowUp[] = [];
 
-  for (const det of detections) {
-    const personId = det.personId;
-
-    const alreadyOpen = allFollowUps.some(
+  for (const { person, missedPrograms } of absentees) {
+    // Avoid creating duplicate open absentee follow-ups for the same person
+    const existingOpen = getAllFollowUps().some(
       (f) =>
-        f.personId === personId &&
-        f.type === absenteeRule.followUpType &&
-        (f.status === 'open' || f.status === 'in-progress')
+        f.personId === person.id &&
+        f.type === (rule.followUpType as FollowUpType) &&
+        f.status === 'open',
     );
+    if (existingOpen) continue;
 
-    if (alreadyOpen) {
-      continue;
-    }
+    const dueDate = new Date(now.getTime());
+    dueDate.setHours(dueDate.getHours() + cfg.followUp.timeframes.absenteeHours);
 
-    const fu = createFollowUp({
-      personId,
-      type: absenteeRule.followUpType,
-      priority: absenteeRule.followUpPriority,
-      dueInHours: config.followUp.timeframes.absenteeHours,
+    const title = `Absentee follow-up: ${person.personalData.firstName ?? ''} ${
+      person.personalData.lastName ?? ''
+    }`.trim();
+
+    const description = `This person has missed ${rule.missedProgramsCount} program(s) within the last ${rule.withinDays} day(s). Missed programs: ${missedPrograms.join(
+      ', ',
+    )}`;
+
+    const followUp = createFollowUp({
+      personId: person.id,
+      type: rule.followUpType as FollowUpType,
+      title,
+      description,
+      dueAt: dueDate.toISOString(),
+      priority: rule.followUpPriority,
       createdByUserId: options.createdByUserId,
-      preferredChannel: 'whatsapp',
-      notes: `Auto-created absentee follow-up for missed programs: ${det.missedProgramIds.join(
-        ', '
-      )}`,
+      // auto-assignment logic could be added here based on cfg.followUp.assignment
     });
 
-    created.push(fu);
+    created.push(followUp);
   }
 
   return created;
-}
-
-// -----------------------------------------------------------------------------
-// Absentee detection automation (direct window scan)
-// -----------------------------------------------------------------------------
-
-export interface AbsenteeDetectionResult {
-  processedPeople: number;
-  consideredPeople: number;
-  createdFollowUps: number;
-  skipped: boolean;
-  reason?: string;
-}
-
-/**
- * Run absentee detection according to SystemConfig.followUp.absenteeRule.
- * This is designed to be called by a "cron-like" endpoint or on-login/on-open.
- *
- * Logic (high level):
- * - Look at programs within absenteeRule.withinDays of referenceDate.
- * - For each person whose category is "member" OR regular guest:
- *   - If they have historical attendance, but have missed at least
- *     absenteeRule.missedProgramsCount programs in this window,
- *     create an "absentee" follow-up if one isn't already open.
- */
-export function runAbsenteeDetection(
-  referenceDate: Date = new Date()
-): AbsenteeDetectionResult {
-  const config = getSystemConfig();
-
-  if (!config.followUp.enabled) {
-    return {
-      processedPeople: 0,
-      consideredPeople: 0,
-      createdFollowUps: 0,
-      skipped: true,
-      reason: 'Follow-up module disabled in SystemConfig.',
-    };
-  }
-
-  const rule = config.followUp.absenteeRule;
-  if (!rule.enabled) {
-    return {
-      processedPeople: 0,
-      consideredPeople: 0,
-      createdFollowUps: 0,
-      skipped: true,
-      reason: 'Absentee rule disabled in SystemConfig.followUp.',
-    };
-  }
-
-  const withinDays = rule.withinDays || 0;
-  if (withinDays <= 0 || rule.missedProgramsCount <= 0) {
-    return {
-      processedPeople: 0,
-      consideredPeople: 0,
-      createdFollowUps: 0,
-      skipped: true,
-      reason: 'Absentee rule misconfigured (withinDays/missedProgramsCount).',
-    };
-  }
-
-  const ref = stripTime(referenceDate);
-  const start = addDays(ref, -withinDays);
-
-  const allPrograms = getAllPrograms();
-  const windowPrograms = filterProgramsByWindow(allPrograms, start, ref);
-
-  if (!windowPrograms.length) {
-    return {
-      processedPeople: 0,
-      consideredPeople: 0,
-      createdFollowUps: 0,
-      skipped: true,
-      reason: 'No programs found in absentee window.',
-    };
-  }
-
-  const programIds = new Set(windowPrograms.map((p) => p.id));
-
-  // Read all attendance records from DB
-  const attendanceRecords = db.getTable<AttendanceRecord>('attendance') ?? [];
-
-  // Pre-index attendance for quick lookup
-  const byPerson = buildAttendanceIndex(attendanceRecords);
-
-  const allPeople = getPeople();
-  let processed = 0;
-  let considered = 0;
-  let created = 0;
-
-  // We will also look at existing follow-ups to avoid duplicates
-  const followUps = db.getTable<FollowUpRecord>('followUps') ?? [];
-
-  for (const person of allPeople) {
-    processed++;
-
-    if (!isPersonEligibleForAbsenteeRule(person)) {
-      continue;
-    }
-    considered++;
-
-    const personAttendance = byPerson.get(person.id) ?? new Set<string>();
-
-    // Historical attendance check (to avoid brand-new people being marked absent)
-    const hasEverAttended = hasAnyAttendance(personAttendance);
-    if (!hasEverAttended) {
-      continue;
-    }
-
-    const missed = countMissedPrograms(programIds, personAttendance);
-    if (missed < rule.missedProgramsCount) {
-      continue;
-    }
-
-    // Avoid duplicate open absentee follow-ups
-    const hasOpenAbsentee = followUps.some(
-      (fu) =>
-        fu.personId === person.id &&
-        fu.type === (rule.followUpType as FollowUpType) &&
-        fu.status !== 'resolved'
-    );
-    if (hasOpenAbsentee) {
-      continue;
-    }
-
-    const dueAt = new Date(
-      ref.getTime() + (config.followUp.timeframes.absenteeHours || 0) * 60 * 60 * 1000
-    );
-
-    const type = (rule.followUpType as FollowUpType) || ('absentee' as FollowUpType);
-    const priority = (rule.followUpPriority as FollowUpPriority) || 'medium';
-
-    const newFollowUp: FollowUpRecord = {
-      id: crypto.randomUUID(),
-      personId: person.id,
-      type,
-      reason: 'absentee-rule',
-      priority,
-      status: 'open',
-      createdAt: new Date().toISOString(),
-      dueAt: dueAt.toISOString(),
-      assignedRmUserId: person.relationship.primaryRmUserId ?? null,
-      metadata: {
-        missedPrograms: missed,
-        windowDays: withinDays,
-      },
-    };
-
-    followUps.push(newFollowUp);
-    created++;
-  }
-
-  if (created > 0) {
-    db.setTable<FollowUpRecord>('followUps', followUps);
-  }
-
-  return {
-    processedPeople: processed,
-    consideredPeople: considered,
-    createdFollowUps: created,
-    skipped: false,
-  };
-}
-
-// ----------------- helpers (absentee detection) ------------------------------
-
-function stripTime(d: Date): Date {
-  const copy = new Date(d);
-  copy.setHours(0, 0, 0, 0);
-  return copy;
-}
-
-function addDays(d: Date, delta: number): Date {
-  const copy = new Date(d);
-  copy.setDate(copy.getDate() + delta);
-  return copy;
-}
-
-function filterProgramsByWindow(
-  programs: Program[],
-  start: Date,
-  end: Date
-): Program[] {
-  const startISO = start.toISOString();
-  const endISO = end.toISOString();
-  return programs.filter((p) => {
-    const date = p.date || p.startAt;
-    if (!date) return false;
-    const iso = new Date(date).toISOString();
-    return iso >= startISO && iso <= endISO;
-  });
-}
-
-function buildAttendanceIndex(
-  records: AttendanceRecord[]
-): Map<string, Set<string>> {
-  const map = new Map<string, Set<string>>();
-  for (const rec of records) {
-    if (!rec.personId || !rec.programId) continue;
-    if (!map.has(rec.personId)) {
-      map.set(rec.personId, new Set());
-    }
-    map.get(rec.personId)!.add(rec.programId);
-  }
-  return map;
-}
-
-function hasAnyAttendance(programSet: Set<string>): boolean {
-  return programSet.size > 0;
-}
-
-function countMissedPrograms(
-  programIds: Set<string>,
-  attendedProgramIds: Set<string>
-): number {
-  let missed = 0;
-  for (const pid of programIds) {
-    if (!attendedProgramIds.has(pid)) {
-      missed++;
-    }
-  }
-  return missed;
-}
-
-/**
- * Decide who the absentee rule applies to.
- * Typically:
- * - Members (including Member + Workforce)
- * - Regular guests (people in the pipeline).
- */
-function isPersonEligibleForAbsenteeRule(person: Person): boolean {
-  if (person.category === 'member') {
-    return true;
-  }
-
-  if (person.category === 'guest') {
-    const t = person.evolution.guestType;
-    return t === 'regular' || t === 'returning';
-  }
-
-  return false;
-}
-
-// ---- Utilities --------------------------------------------------------------
-
-function computeDueDate(fromIso: string, hours: number): string {
-  const base = new Date(fromIso);
-  if (Number.isNaN(base.getTime())) {
-    return nowIso();
-  }
-  base.setHours(base.getHours() + hours);
-  return base.toISOString();
 }
