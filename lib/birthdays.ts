@@ -60,7 +60,6 @@ export function runBirthdayAutomation(
   const allPeople = getAllPeople();
   const logs = db.getTable<BirthdayLog>('birthdayLogs') ?? [];
 
-  // If you already have a FollowUpRecord type defined, we reuse it:
   type FollowUpRecord = import('@/types').FollowUpRecord;
   const followUps = db.getTable<FollowUpRecord>('followUps') ?? [];
 
@@ -113,7 +112,6 @@ export function runBirthdayAutomation(
       // Create a follow-up instead of auto-sending
       const followUpType = birthdaysCfg.followUpType || 'birthday';
       const dueAt = new Date(targetDate);
-      // you could offset dueAt by a few hours if needed
 
       const newFollowUp: FollowUpRecord = {
         id: crypto.randomUUID(),
@@ -159,6 +157,61 @@ export function runBirthdayAutomation(
   };
 }
 
+// -----------------------------------------------------------------------------
+// Upcoming birthdays helper for dashboard
+// -----------------------------------------------------------------------------
+
+export interface UpcomingBirthday {
+  personId: string;
+  fullName: string;
+  dob: string;
+  nextBirthdayDate: string; // ISO
+  daysUntil: number;
+  isToday: boolean;
+  category: Person['category'];
+}
+
+/**
+ * Returns upcoming birthdays in the next `daysAhead` days (inclusive).
+ * Uses local time (browser/server default).
+ */
+export function getUpcomingBirthdays(daysAhead: number = 7): UpcomingBirthday[] {
+  const allPeople = getAllPeople();
+  const today = stripTime(new Date());
+
+  const results: UpcomingBirthday[] = [];
+
+  for (const person of allPeople) {
+    const dobISO = person.personalData.dob;
+    if (!dobISO) continue;
+
+    const dob = new Date(dobISO);
+    if (isNaN(dob.getTime())) continue;
+
+    const next = computeNextBirthday(dob, today);
+    const daysUntil = diffInDays(today, next);
+    if (daysUntil < 0 || daysUntil > daysAhead) continue;
+
+    results.push({
+      personId: person.id,
+      fullName: `${person.personalData.firstName} ${person.personalData.lastName}`,
+      dob: dob.toISOString(),
+      nextBirthdayDate: next.toISOString(),
+      daysUntil,
+      isToday: daysUntil === 0,
+      category: person.category,
+    });
+  }
+
+  // Sort: soonest first, then by name
+  results.sort((a, b) => {
+    if (a.daysUntil !== b.daysUntil) return a.daysUntil - b.daysUntil;
+    return a.fullName.localeCompare(b.fullName);
+  });
+
+  return results;
+}
+
 // ----------------- helpers -----------------
 
 function stripTime(d: Date): Date {
@@ -171,4 +224,21 @@ function addDays(d: Date, delta: number): Date {
   const copy = new Date(d);
   copy.setDate(copy.getDate() + delta);
   return copy;
+}
+
+function diffInDays(a: Date, b: Date): number {
+  const ms = stripTime(b).getTime() - stripTime(a).getTime();
+  return Math.round(ms / (1000 * 60 * 60 * 24));
+}
+
+function computeNextBirthday(dob: Date, today: Date): Date {
+  const year = today.getFullYear();
+  const month = dob.getMonth(); // 0–11
+  const day = dob.getDate(); // 1–31
+
+  const thisYear = new Date(year, month, day);
+  if (thisYear >= stripTime(today)) {
+    return thisYear;
+  }
+  return new Date(year + 1, month, day);
 }
