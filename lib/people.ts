@@ -507,3 +507,29 @@ export function promoteGuestToMember(
     preferredChannel: data.preferredChannel,
   });
 }
+
+// -----------------------------------------------------------------------------
+// Public-side helpers (self-service access)
+// -----------------------------------------------------------------------------
+
+/**
+ * Normalize phone number for comparison:
+ * - Strip all non-digits
+ * - Works with +234, 0xxx, spaces, etc.
+ */
+function normalizePhone(phone: string | null | undefined): string {
+  if (!phone) return '';
+  return phone.replace(/\D/g, '');
+}
+
+/**
+ * Find a person by phone number (used by /access public flow).
+ * This is intentionally simple and offline-friendly.
+ */
+export function findPersonByPhone(phone: string): Person | undefined {
+  const target = normalizePhone(phone);
+  if (!target) return undefined;
+
+  const all = getAllPeople();
+  return all.find((p) => normalizePhone(p.personalData.phone) === target);
+}
