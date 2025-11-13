@@ -1,12 +1,11 @@
+// lib/birthdays.ts
+
 import { getSystemConfig } from './config';
 import { getAllPeople } from './people';
 import { db } from './database';
 import { sendMessageToPerson } from './communications';
 
-import type {
-  Person,
-  CommunicationChannel,
-} from '@/types';
+import type { Person, CommunicationChannel } from '@/types';
 
 export interface BirthdayAutomationResult {
   processedPeople: number;
@@ -26,20 +25,19 @@ interface BirthdayLog {
 
 /**
  * Run birthday automation for a given reference date (default: today).
- * This is designed to be called by a cron-like endpoint or on-login/on-open.
  *
  * Logic:
- * - Look at targetDate = referenceDate + config.birthdays.daysBefore
- * - Find people whose DOB (month/day) matches targetDate
- * - Check if we've already sent for this person for targetDate.year
- * - If not, send using communications engine and record log
+ * - targetDate = referenceDate + config.birthdays.daysBefore
+ * - For each person with DOB (month/day) == targetDate (month/day):
+ *   - Check if we've already sent for this year (birthdayLogs table)
+ *   - If not, send via communications engine and log it
  */
 export function runBirthdayAutomation(
   referenceDate: Date = new Date()
 ): BirthdayAutomationResult {
   const config = getSystemConfig();
 
-  if (!config.birthdays?.enabled) {
+  if (!config.birthdays || !config.birthdays.enabled) {
     return {
       processedPeople: 0,
       birthdayCandidates: 0,
@@ -49,13 +47,14 @@ export function runBirthdayAutomation(
     };
   }
 
-  const targetDate = addDays(stripTime(referenceDate), config.birthdays.daysBefore || 0);
+  const { daysBefore = 0, defaultChannel, messageTemplate } = config.birthdays;
+
+  const targetDate = addDays(stripTime(referenceDate), daysBefore);
   const targetMonth = targetDate.getMonth() + 1; // 1–12
   const targetDay = targetDate.getDate();
   const targetYear = targetDate.getFullYear();
 
   const allPeople = getAllPeople();
-
   const logs = db.getTable<BirthdayLog>('birthdayLogs') ?? [];
 
   let processed = 0;
@@ -74,28 +73,23 @@ export function runBirthdayAutomation(
     const dobMonth = dob.getMonth() + 1;
     const dobDay = dob.getDate();
 
+    // Only match month + day (year doesn't matter)
     if (dobMonth !== targetMonth || dobDay !== targetDay) {
       continue;
     }
 
     candidates++;
 
-    // Has a birthday message already been sent this year?
+    // Avoid sending more than once per year
     const alreadySent = logs.some(
       (log) => log.personId === person.id && log.year === targetYear
     );
     if (alreadySent) continue;
 
-    const channel: CommunicationChannel =
-      config.birthdays.defaultChannel ?? 'whatsapp';
+    const channel: CommunicationChannel = defaultChannel ?? 'whatsapp';
+    const body = personaliseBirthdayTemplate(messageTemplate, person);
 
-    const body = personaliseBirthdayTemplate(
-      config.birthdays.messageTemplate,
-      person
-    );
-
-    // If there is no reachable contact on the preferred channel, you might
-    // modify this to fall back to other channels. For now we always attempt.
+    // Fire-and-forget; if you want strict error handling, you can await and catch
     void sendMessageToPerson({
       personId: person.id,
       channel,
@@ -115,6 +109,7 @@ export function runBirthdayAutomation(
       channel,
       sentAt: new Date().toISOString(),
     };
+
     logs.push(newLog);
     sent++;
   }
@@ -131,7 +126,7 @@ export function runBirthdayAutomation(
   };
 }
 
-// ----------------- helpers ----------------------------------------------------
+// ----------------- helpers -----------------
 
 function stripTime(d: Date): Date {
   const copy = new Date(d);
