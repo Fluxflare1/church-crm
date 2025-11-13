@@ -1,253 +1,264 @@
 'use client';
 
-import {
-  getAttendanceRecords,
-  saveAttendanceRecords,
-  getPrograms,
-  getPeople,
-  getSystemConfig,
-} from './database';
-
-import { applyAttendanceToPerson } from './people';
+import { nanoid } from 'nanoid';
+import { getAllPeople } from './people';
+import { getAllPrograms } from './programs';
+import { getSystemConfig } from './config';
+import { createAbsenteeFollowUps, AbsenteeDetected } from './follow-ups';
 
 import type {
   AttendanceRecord,
   AttendanceStatus,
-  AbsenteeDetectionResult,
-  Program,
   Person,
-  AttendanceScope,
+  Program,
+  SystemConfig,
 } from '@/types';
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
+const STORAGE_KEY = 'church-crm:attendance';
 
-function generateId(prefix: string): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return `${prefix}_${crypto.randomUUID()}`;
+let inMemoryAttendance: AttendanceRecord[] = [];
+
+/* -------------------------------------------------------------------------- */
+/*  Storage helpers                                                           */
+/* -------------------------------------------------------------------------- */
+
+function loadAttendance(): AttendanceRecord[] {
+  if (typeof window === 'undefined') {
+    return inMemoryAttendance;
   }
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      inMemoryAttendance = [];
+      return inMemoryAttendance;
+    }
+    const parsed = JSON.parse(raw) as AttendanceRecord[];
+    if (!Array.isArray(parsed)) {
+      inMemoryAttendance = [];
+      return inMemoryAttendance;
+    }
+    inMemoryAttendance = parsed;
+    return inMemoryAttendance;
+  } catch {
+    inMemoryAttendance = [];
+    return inMemoryAttendance;
+  }
 }
 
-export interface MarkAttendanceOptions {
-  personId: string;
+function saveAttendance(list: AttendanceRecord[]): void {
+  inMemoryAttendance = list;
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // best-effort
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public API: basic attendance                                              */
+/* -------------------------------------------------------------------------- */
+
+export function getAllAttendanceRecords(): AttendanceRecord[] {
+  return loadAttendance();
+}
+
+export function getAttendanceForProgram(programId: string): AttendanceRecord[] {
+  return loadAttendance().filter((r) => r.programId === programId);
+}
+
+export function getAttendanceForPerson(personId: string): AttendanceRecord[] {
+  return loadAttendance().filter((r) => r.personId === personId);
+}
+
+export interface MarkAttendanceInput {
   programId: string;
-  present: boolean;
-  checkInTimeIso?: string;
-  recordedByUserId: string;
+  personId: string;
+  status: AttendanceStatus; // 'present' | 'absent' | 'excused' etc.
+  timestamp?: string;
+  markedByUserId: string;
 }
 
 /**
- * Create or update an attendance record for a single person & program,
- * and apply its effect to the person's evolution state.
+ * Mark or update a person’s attendance for a program.
  */
-export function markAttendanceForPerson(options: MarkAttendanceOptions): AttendanceRecord {
-  const records = getAttendanceRecords();
-  const existingIndex = records.findIndex(
-    (r) => r.personId === options.personId && r.programId === options.programId
+export function markAttendance(input: MarkAttendanceInput): AttendanceRecord {
+  const now = new Date().toISOString();
+  const ts = input.timestamp ?? now;
+
+  const list = loadAttendance();
+  const existingIndex = list.findIndex(
+    (r) => r.programId === input.programId && r.personId === input.personId,
   );
 
-  const status: AttendanceStatus = options.present ? 'present' : 'absent';
-  const now = nowIso();
-
   let record: AttendanceRecord;
-  if (existingIndex === -1) {
+
+  if (existingIndex >= 0) {
     record = {
-      id: generateId('att'),
-      personId: options.personId,
-      programId: options.programId,
-      status,
-      checkInTime: options.checkInTimeIso,
-      recordedByUserId: options.recordedByUserId,
-      recordedAt: now,
+      ...list[existingIndex],
+      status: input.status,
+      timestamp: ts,
+      updatedAt: now,
+      markedByUserId: input.markedByUserId,
     };
-    records.push(record);
+    list[existingIndex] = record;
   } else {
-    const existing = records[existingIndex];
     record = {
-      ...existing,
-      status,
-      checkInTime: options.checkInTimeIso ?? existing.checkInTime,
-      recordedByUserId: options.recordedByUserId,
-      recordedAt: now,
+      id: nanoid(),
+      programId: input.programId,
+      personId: input.personId,
+      status: input.status,
+      timestamp: ts,
+      createdAt: now,
+      updatedAt: now,
+      markedByUserId: input.markedByUserId,
     };
-    records[existingIndex] = record;
+    list.push(record);
   }
 
-  saveAttendanceRecords(records);
-
-  // Update Person evolution state
-  applyAttendanceToPerson({
-    personId: options.personId,
-    programId: options.programId,
-    dateIso: getProgramDateIso(options.programId) ?? now,
-    present: options.present,
-  });
-
+  saveAttendance(list);
   return record;
 }
 
-export interface BulkMarkAttendanceInput {
-  programId: string;
-  recordedByUserId: string;
-  entries: Array<{
-    personId: string;
-    present: boolean;
-    checkInTimeIso?: string;
-  }>;
+/* -------------------------------------------------------------------------- */
+/*  Absentee automation                                                       */
+/* -------------------------------------------------------------------------- */
+
+export interface AbsenteeAutomationResult {
+  ruleEnabled: boolean;
+  consideredProgramsCount: number;
+  absenteesCount: number;
+  followUpsCreated: number;
+  details: AbsenteeDetected[];
 }
 
 /**
- * Mark attendance for many people in a single program.
+ * Run absentee detection over a window of days and create follow-ups
+ * for people who have missed enough programs.
+ *
+ * Uses SystemConfig.followUp.absenteeRule.
  */
-export function bulkMarkAttendanceForProgram(input: BulkMarkAttendanceInput): AttendanceRecord[] {
-  const updated: AttendanceRecord[] = [];
+export function runAbsenteeAutomation(options?: {
+  now?: Date;
+  dryRun?: boolean;
+  createdByUserId?: string;
+}): AbsenteeAutomationResult {
+  const now = options?.now ?? new Date();
+  const createdByUserId = options?.createdByUserId ?? 'system';
 
-  for (const entry of input.entries) {
-    const record = markAttendanceForPerson({
-      personId: entry.personId,
-      programId: input.programId,
-      present: entry.present,
-      checkInTimeIso: entry.checkInTimeIso,
-      recordedByUserId: input.recordedByUserId,
-    });
-    updated.push(record);
+  const cfg: SystemConfig = getSystemConfig();
+  const rule = cfg.followUp.absenteeRule;
+
+  if (!rule.enabled) {
+    return {
+      ruleEnabled: false,
+      consideredProgramsCount: 0,
+      absenteesCount: 0,
+      followUpsCreated: 0,
+      details: [],
+    };
   }
 
-  return updated;
-}
+  const allPrograms = getAllPrograms();
+  const allAttendance = getAllAttendanceRecords();
+  const allPeople = getAllPeople();
 
-// ---- Absentee detection -----------------------------------------------------
+  // Programs within window and matching optional types
+  const cutoff = new Date(
+    now.getTime() - rule.withinDays * 24 * 60 * 60 * 1000,
+  );
 
-function getProgramDateIso(programId: string): string | undefined {
-  const program = getPrograms().find((p) => p.id === programId);
-  return program?.date;
-}
+  const consideredProgramTypes = cfg.evolution.considerProgramsOfType;
 
-function parseIsoDate(dateStr: string): Date | null {
-  const d = new Date(dateStr);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function filterProgramsInRange(programs: Program[], fromDateIso: string, toDateIso: string): Program[] {
-  const from = parseIsoDate(fromDateIso);
-  const to = parseIsoDate(toDateIso);
-  if (!from || !to) return [];
-
-  return programs.filter((p) => {
-    const d = parseIsoDate(p.date);
-    if (!d) return false;
-    return d >= from && d <= to;
-  });
-}
-
-function getExpectedPeople(scope: AttendanceScope, trackWorkersOnly: boolean): Person[] {
-  const people = getPeople();
-  return people.filter((person) => {
-    if (trackWorkersOnly && !person.engagement.isWorker) {
-      return false;
+  const relevantPrograms = allPrograms.filter((p) => {
+    const date = new Date(p.date);
+    if (Number.isNaN(date.getTime())) return false;
+    if (date < cutoff || date > now) return false;
+    if (consideredProgramTypes && consideredProgramTypes.length > 0) {
+      return consideredProgramTypes.includes(p.type);
     }
-
-    if (scope === 'all') return true;
-
-    if (scope === 'members-only') {
-      return person.category === 'member';
-    }
-
-    if (scope === 'guests-only') {
-      return person.category === 'guest';
-    }
-
-    if (scope === 'members-and-regular-guests') {
-      if (person.category === 'member') return true;
-      if (
-        person.category === 'guest' &&
-        person.evolution.guestType === 'regular'
-      ) {
-        return true;
-      }
-      return false;
-    }
-
     return true;
   });
-}
 
-/**
- * Detect absentees between fromDateIso and toDateIso (inclusive),
- * based on SystemConfig.attendance.defaultScope and followUp.absenteeRule.
- */
-export function detectAbsenteesInRange(fromDateIso: string, toDateIso: string): AbsenteeDetectionResult[] {
-  const config = getSystemConfig();
-  const attendanceScope = config.attendance.defaultScope;
-  const trackWorkersOnly = config.attendance.trackWorkersOnly;
-  const absenteeRule = config.followUp.absenteeRule;
+  const consideredProgramIds = new Set(relevantPrograms.map((p) => p.id));
 
-  if (!absenteeRule.enabled) {
-    return [];
+  // Filter people by scope
+  const trackedPeople = allPeople.filter((person) =>
+    isPersonTrackedByScope(person, rule.scope),
+  );
+
+  const attendanceByKey = new Map<string, AttendanceRecord>();
+  for (const rec of allAttendance) {
+    const key = `${rec.programId}:${rec.personId}`;
+    attendanceByKey.set(key, rec);
   }
 
-  const allPrograms = getPrograms();
-  const relevantPrograms = filterProgramsInRange(allPrograms, fromDateIso, toDateIso);
+  const absentees: AbsenteeDetected[] = [];
 
-  const considerTypes = config.evolution.considerProgramsOfType;
-  const filteredPrograms = considerTypes && considerTypes.length > 0
-    ? relevantPrograms.filter((p) => considerTypes.includes(p.type))
-    : relevantPrograms;
-
-  if (!filteredPrograms.length) {
-    return [];
-  }
-
-  const attendance = getAttendanceRecords();
-  const expectedPeople = getExpectedPeople(attendanceScope, trackWorkersOnly);
-
-  const results: AbsenteeDetectionResult[] = [];
-
-  for (const person of expectedPeople) {
+  for (const person of trackedPeople) {
     const missedProgramIds: string[] = [];
 
-    for (const program of filteredPrograms) {
-      const hasPresentRecord = attendance.some(
-        (r) =>
-          r.programId === program.id &&
-          r.personId === person.id &&
-          r.status === 'present'
-      );
-      if (!hasPresentRecord) {
-        missedProgramIds.push(program.id);
+    for (const programId of consideredProgramIds) {
+      const key = `${programId}:${person.id}`;
+      const rec = attendanceByKey.get(key);
+
+      if (!rec) {
+        // No record at all => treat as missed
+        missedProgramIds.push(programId);
+      } else if (rec.status === 'absent') {
+        missedProgramIds.push(programId);
+      } else {
+        // present or excused => not counted as missed
       }
     }
 
-    if (missedProgramIds.length >= absenteeRule.missedProgramsCount) {
-      results.push({
-        personId: person.id,
-        missedProgramIds,
-        fromDate: fromDateIso,
-        toDate: toDateIso,
+    if (missedProgramIds.length >= rule.missedProgramsCount) {
+      absentees.push({
+        person,
+        missedPrograms: missedProgramIds,
       });
     }
   }
 
-  return results;
+  let followUpsCreated = 0;
+  if (!options?.dryRun && absentees.length > 0 && rule.createFollowUp) {
+    const created = createAbsenteeFollowUps(absentees, { createdByUserId });
+    followUpsCreated = created.length;
+  }
+
+  return {
+    ruleEnabled: true,
+    consideredProgramsCount: consideredProgramIds.size,
+    absenteesCount: absentees.length,
+    followUpsCreated,
+    details: absentees,
+  };
 }
 
-/**
- * Detect absentees in the configured window (followUp.absenteeRule.withinDays)
- * ending "today".
- */
-export function detectAbsenteesForConfiguredWindow(): AbsenteeDetectionResult[] {
-  const config = getSystemConfig();
-  const absenteeRule = config.followUp.absenteeRule;
-  if (!absenteeRule.enabled) return [];
+/* -------------------------------------------------------------------------- */
+/*  Helpers                                                                   */
+/* -------------------------------------------------------------------------- */
 
-  const now = new Date();
-  const toIso = now.toISOString();
-
-  const from = new Date(now);
-  from.setDate(now.getDate() - absenteeRule.withinDays);
-  const fromIso = from.toISOString();
-
-  return detectAbsenteesInRange(fromIso, toIso);
+function isPersonTrackedByScope(
+  person: Person,
+  scope: SystemConfig['followUp']['absenteeRule']['scope'],
+): boolean {
+  switch (scope) {
+    case 'all':
+      return true;
+    case 'members-only':
+      return person.category === 'member';
+    case 'guests-only':
+      return person.category === 'guest';
+    case 'members-and-regular-guests':
+      if (person.category === 'member') return true;
+      if (person.category === 'guest') {
+        return person.evolution?.guestType === 'regular';
+      }
+      return false;
+    default:
+      return true;
+  }
 }
