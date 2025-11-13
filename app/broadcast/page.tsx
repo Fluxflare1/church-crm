@@ -12,6 +12,7 @@ import {
   resolveRecipientsBySegment,
   segmentLabel,
 } from '@/lib/broadcasts';
+import { getSystemConfig } from '@/lib/config';
 
 import type {
   Program,
@@ -19,6 +20,7 @@ import type {
   CommunicationChannel,
   BroadcastSegmentKey,
   BroadcastRecord,
+  BroadcastMessageTemplateConfig,
 } from '@/types';
 
 const CURRENT_USER_ID = 'system'; // TODO: replace with real authenticated user ID
@@ -28,6 +30,7 @@ type BroadcastFormState = {
   segment: BroadcastSegmentKey;
   channel: CommunicationChannel;
   messageBody: string;
+  templateId: string | null;
 };
 
 export default function BroadcastPage() {
@@ -36,19 +39,26 @@ export default function BroadcastPage() {
   const [programs, setPrograms] = useState<Program[]>([]);
   const [people, setPeople] = useState<Person[]>([]);
   const [history, setHistory] = useState<BroadcastRecord[]>([]);
+  const [templates, setTemplates] = useState<BroadcastMessageTemplateConfig[]>(
+    [],
+  );
 
   const [form, setForm] = useState<BroadcastFormState>({
     programId: '',
     segment: 'all-people',
     channel: 'whatsapp',
     messageBody: '',
+    templateId: null,
   });
 
   const [sending, setSending] = useState(false);
   const [sentCount, setSentCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Initial load
+  /* ------------------------------------------------------------------------ */
+  /*  Init                                                                    */
+  /* ------------------------------------------------------------------------ */
+
   useEffect(() => {
     const allPrograms = getAllPrograms().sort((a, b) =>
       a.date.localeCompare(b.date),
@@ -63,20 +73,25 @@ export default function BroadcastPage() {
     setPeople(allPeople);
 
     setHistory(getBroadcastHistory());
+
+    const cfg = getSystemConfig();
+    setTemplates(cfg.communications.broadcastTemplates ?? []);
   }, []);
 
-  // Selected program
   const selectedProgram = useMemo(
     () => programs.find((p) => p.id === form.programId) ?? null,
     [programs, form.programId],
   );
 
-  // Pre-select program from ?programId, and auto-build default message once
+  const selectedTemplate = useMemo(
+    () => templates.find((t) => t.id === form.templateId) ?? null,
+    [templates, form.templateId],
+  );
+
   useEffect(() => {
     if (!programs.length) return;
 
     setForm((prev) => {
-      // only initialise once
       if (prev.programId) return prev;
 
       const qpProgramId = searchParams.get('programId');
@@ -86,21 +101,36 @@ export default function BroadcastPage() {
           : programs[0]?.id) ?? '';
 
       const program = programs.find((p) => p.id === initialProgramId) ?? null;
-      const defaultBody = buildDefaultMessage(program);
+
+      // If there is an "active" template, use it as default; else build fallback
+      const defaultTemplate =
+        templates.find((t) => t.isActive) ?? templates[0] ?? null;
+
+      const defaultBody = defaultTemplate
+        ? defaultTemplate.bodyTemplate
+        : buildDefaultMessage(program);
+
+      const defaultChannel =
+        defaultTemplate?.defaultChannel ?? (prev.channel || 'whatsapp');
 
       return {
         ...prev,
         programId: initialProgramId,
         messageBody: defaultBody,
+        channel: defaultChannel,
+        templateId: defaultTemplate?.id ?? null,
       };
     });
-  }, [programs, searchParams]);
+  }, [programs, searchParams, templates]);
 
-  // Recipients based on refined segment
   const targetPeople = useMemo(
     () => resolveRecipientsBySegment(form.segment, people),
     [form.segment, people],
   );
+
+  /* ------------------------------------------------------------------------ */
+  /*  Handlers                                                                */
+  /* ------------------------------------------------------------------------ */
 
   function handleChange(
     e: React.ChangeEvent<HTMLSelectElement | HTMLTextAreaElement>,
@@ -113,7 +143,7 @@ export default function BroadcastPage() {
 
     if (name === 'programId') {
       const program = programs.find((p) => p.id === value) ?? null;
-      if (program && !form.messageBody.trim()) {
+      if (!form.messageBody.trim() && !selectedTemplate) {
         setForm((prev) => ({
           ...prev,
           messageBody: buildDefaultMessage(program),
@@ -128,6 +158,30 @@ export default function BroadcastPage() {
       ...prev,
       channel: value as CommunicationChannel,
     }));
+  }
+
+  function handleTemplateChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const templateId = e.target.value || null;
+    const template =
+      templateId && templates.length
+        ? templates.find((t) => t.id === templateId) ?? null
+        : null;
+
+    setForm((prev) => {
+      if (!template) {
+        return {
+          ...prev,
+          templateId: null,
+        };
+      }
+
+      return {
+        ...prev,
+        templateId,
+        messageBody: template.bodyTemplate,
+        channel: (template.defaultChannel as CommunicationChannel) ?? prev.channel,
+      };
+    });
   }
 
   function buildDefaultMessage(program: Program | null): string {
@@ -184,6 +238,7 @@ export default function BroadcastPage() {
           context: {
             programId: form.programId,
             segment: form.segment,
+            templateId: form.templateId ?? undefined,
           },
         });
 
@@ -195,11 +250,11 @@ export default function BroadcastPage() {
       const failureCount = targetPeople.length - successCount;
       setSentCount(successCount);
 
-      // Record summary in history
       recordBroadcastSummary({
         programId: form.programId || undefined,
         channel: form.channel,
         segmentKey: form.segment,
+        templateId: form.templateId ?? undefined,
         messageBody: form.messageBody,
         totalTargets: targetPeople.length,
         successCount,
@@ -222,6 +277,10 @@ export default function BroadcastPage() {
     }
   }
 
+  /* ------------------------------------------------------------------------ */
+  /*  Render                                                                  */
+  /* ------------------------------------------------------------------------ */
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -231,7 +290,7 @@ export default function BroadcastPage() {
         </h1>
         <p className="mt-1 text-sm text-slate-500">
           Send program-based messages via WhatsApp, SMS, or Email to members, guests,
-          or workforce segments.
+          or workforce segments, using saved templates.
         </p>
       </div>
 
@@ -327,6 +386,33 @@ export default function BroadcastPage() {
               </p>
             </div>
 
+            {/* Template selector */}
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                Template
+              </label>
+              <select
+                value={form.templateId ?? ''}
+                onChange={handleTemplateChange}
+                className="mt-1 w-full rounded-md border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-700"
+              >
+                <option value="">None (type message manually)</option>
+                {templates
+                  .filter((t) => t.isActive)
+                  .map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+              </select>
+              {selectedTemplate && (
+                <p className="mt-1 text-[11px] text-slate-500">
+                  {selectedTemplate.description || 'Active template'} · Default channel:{' '}
+                  {selectedTemplate.defaultChannel ?? 'whatsapp'}
+                </p>
+              )}
+            </div>
+
             {/* Channel */}
             <div>
               <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
@@ -364,6 +450,12 @@ export default function BroadcastPage() {
                 </span>
               </div>
               <div>
+                Template:{' '}
+                <span className="font-medium">
+                  {selectedTemplate ? selectedTemplate.name : 'None'}
+                </span>
+              </div>
+              <div>
                 Channel:{' '}
                 <span className="font-medium">
                   {channelLabel(form.channel)}
@@ -381,12 +473,16 @@ export default function BroadcastPage() {
               You can use placeholders like{' '}
               <code className="rounded bg-slate-100 px-1 py-0.5 text-[10px] dark:bg-slate-800">
                 {'{{firstName}}'}
+              </code>
+              ,{' '}
+              <code className="rounded bg-slate-100 px-1 py-0.5 text-[10px] dark:bg-slate-800">
+                {'{{programName}}'}
               </code>{' '}
               and{' '}
               <code className="rounded bg-slate-100 px-1 py-0.5 text-[10px] dark:bg-slate-800">
-                {'{{programName}}'}
+                {'{{programDate}}'}
               </code>
-              . They will be replaced per person.
+              .
             </p>
             <textarea
               name="messageBody"
@@ -426,6 +522,7 @@ export default function BroadcastPage() {
                   <th className="px-3 py-2 font-medium">Date</th>
                   <th className="px-3 py-2 font-medium">Program</th>
                   <th className="px-3 py-2 font-medium">Segment</th>
+                  <th className="px-3 py-2 font-medium">Template</th>
                   <th className="px-3 py-2 font-medium">Channel</th>
                   <th className="px-3 py-2 font-medium">Sent / Targets</th>
                 </tr>
@@ -435,6 +532,10 @@ export default function BroadcastPage() {
                   const program = record.programId
                     ? programs.find((p) => p.id === record.programId) ?? null
                     : null;
+                  const tmpl = record.templateId
+                    ? templates.find((t) => t.id === record.templateId) ?? null
+                    : null;
+
                   return (
                     <tr
                       key={record.id}
@@ -448,6 +549,9 @@ export default function BroadcastPage() {
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
                         {segmentLabel(record.segmentKey)}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
+                        {tmpl ? tmpl.name : record.templateId ?? '—'}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
                         {channelLabel(record.channel)}
