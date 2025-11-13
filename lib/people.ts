@@ -489,3 +489,21 @@ export function promoteGuestToMember(
   dbUpsertPerson(configured);
   return configured;
 }
+
+
+  export function createGuestFromConnectForm(data: any): Person {
+  return createGuest({
+    firstName: data.firstName,
+    lastName: data.lastName,
+    phone: data.phone,
+    email: data.email,
+    gender: data.gender,
+    dob: data.dob,
+    howHeard: data.howHeard,
+    invitee: data.invitee,
+    spiritualInterests: data.spiritualInterests ?? [],
+    communicationsConsent: data.communicationsConsent ?? false,
+    attendedWith: data.attendedWith,
+    preferredChannel: data.preferredChannel,
+  });
+}
