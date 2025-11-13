@@ -6,7 +6,6 @@ import {
   promoteGuestToMember,
   createMember,
 } from '@/lib/people';
-
 import type { Person, MemberStatus } from '@/types';
 
 const MEMBERSHIP_STATUSES: { value: MemberStatus; label: string }[] = [
@@ -18,6 +17,7 @@ const MEMBERSHIP_STATUSES: { value: MemberStatus; label: string }[] = [
 export default function OnboardMemberPage() {
   const [people, setPeople] = useState<Person[]>([]);
 
+  // --- Promotion state ---
   const [promotionPersonId, setPromotionPersonId] = useState<string>('');
   const [promotionDate, setPromotionDate] = useState<string>(
     new Date().toISOString().slice(0, 10)
@@ -27,6 +27,7 @@ export default function OnboardMemberPage() {
   const [promotionError, setPromotionError] = useState<string | null>(null);
   const [promoting, setPromoting] = useState(false);
 
+  // --- New member state ---
   const [newMember, setNewMember] = useState({
     firstName: '',
     lastName: '',
@@ -48,12 +49,15 @@ export default function OnboardMemberPage() {
     setPeople(all);
   }, []);
 
+  // Guests that evolution logic has marked as ready for promotion
   const promotableGuests = people.filter(
     (p) =>
       p.category === 'guest' &&
       p.evolution.guestType === 'regular' &&
       p.evolution.readyForPromotion
   );
+
+  // ---------------- PROMOTE GUEST → MEMBER ----------------
 
   const handlePromote = (e: FormEvent) => {
     e.preventDefault();
@@ -67,19 +71,21 @@ export default function OnboardMemberPage() {
 
     setPromoting(true);
     try {
-      const person = promoteGuestToMember({
+      const promoted = promoteGuestToMember({
         personId: promotionPersonId,
         membershipDate: new Date(promotionDate).toISOString(),
         membershipStatus: 'active',
         membershipNumber: undefined,
         isWorker: promotionIsWorker,
-        force: false,
+        force: false, // set true if you want to override thresholds
       });
 
-      if (!person) {
-        setPromotionError('Failed to promote guest.');
+      if (!promoted) {
+        setPromotionError('Failed to promote guest (no changes applied).');
       } else {
-        setPromotionMessage('Guest promoted to member successfully.');
+        setPromotionMessage(
+          `Guest promoted to member${promotionIsWorker ? ' + Workforce' : ''} successfully.`
+        );
         const all = getAllPeople();
         setPeople(all);
         setPromotionPersonId('');
@@ -93,6 +99,8 @@ export default function OnboardMemberPage() {
     }
   };
 
+  // ---------------- CREATE NEW MEMBER ----------------
+
   const handleCreateMember = (e: FormEvent) => {
     e.preventDefault();
     setNewMemberError(null);
@@ -105,7 +113,7 @@ export default function OnboardMemberPage() {
 
     setCreating(true);
     try {
-      const member = createMember({
+      const person = createMember({
         personalData: {
           firstName: newMember.firstName,
           lastName: newMember.lastName,
@@ -113,21 +121,23 @@ export default function OnboardMemberPage() {
           email: newMember.email || undefined,
           gender: newMember.gender || undefined,
           dob: newMember.dob || undefined,
-          churchName: undefined,
+          churchName: undefined, // can be filled from SystemConfig elsewhere
         },
         membershipDate: new Date(newMember.membershipDate).toISOString(),
         membershipStatus: newMember.membershipStatus,
         membershipNumber: newMember.membershipNumber || undefined,
+        isWorker: newMember.isWorker, // Member vs Member + Workforce
         tags: [],
         primaryRmUserId: undefined,
         secondaryRmUserIds: [],
-        isWorker: newMember.isWorker,
       });
 
-      if (!member) {
+      if (!person) {
         setNewMemberError('Failed to create member.');
       } else {
-        setNewMemberMessage('Member created successfully.');
+        setNewMemberMessage(
+          `Member created successfully${newMember.isWorker ? ' (Member + Workforce)' : ''}.`
+        );
         const all = getAllPeople();
         setPeople(all);
         setNewMember({
@@ -151,19 +161,23 @@ export default function OnboardMemberPage() {
     }
   };
 
+  // ---------------- RENDER ----------------
+
   return (
     <div className="p-6 space-y-6">
-      <div>
+      <header>
         <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
           Member Onboarding
         </h1>
         <p className="text-sm text-slate-500">
-          Promote regular guests to members or create new members directly.
+          Promote regular guests to members or create new members directly. Use{' '}
+          <span className="font-medium">Member</span> or{' '}
+          <span className="font-medium">Member + Workforce</span> depending on their role.
         </p>
-      </div>
+      </header>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        {/* Promotion from guest */}
+        {/* ===== Left: Promote Guest → Member ===== */}
         <form
           onSubmit={handlePromote}
           className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm space-y-4"
@@ -174,7 +188,7 @@ export default function OnboardMemberPage() {
                 Promote Guest → Member
               </h2>
               <p className="text-xs text-slate-500">
-                Uses evolution thresholds and keeps history.
+                Uses evolution thresholds and keeps full guest history.
               </p>
             </div>
           </div>
@@ -183,9 +197,7 @@ export default function OnboardMemberPage() {
             <div className="text-xs text-red-600">{promotionError}</div>
           )}
           {promotionMessage && (
-            <div className="text-xs text-emerald-600">
-              {promotionMessage}
-            </div>
+            <div className="text-xs text-emerald-600">{promotionMessage}</div>
           )}
 
           <div className="space-y-3">
@@ -201,39 +213,42 @@ export default function OnboardMemberPage() {
                 <option value="">Select regular guest...</option>
                 {promotableGuests.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.personalData.firstName} {p.personalData.lastName}
+                    {p.personalData.firstName} {p.personalData.lastName} ·{' '}
+                    {p.evolution.visitCount} visits
                   </option>
                 ))}
               </select>
               {promotableGuests.length === 0 && (
                 <p className="mt-1 text-[11px] text-slate-500">
-                  No guests currently meet promotion thresholds.
+                  No guests currently meet promotion thresholds. Adjust evolution
+                  settings in <span className="font-medium">Settings → Evolution</span> if needed.
                 </p>
               )}
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
-                Membership date
-              </label>
-              <input
-                type="date"
-                value={promotionDate}
-                onChange={(e) => setPromotionDate(e.target.value)}
-                className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
-              />
-            </div>
-
-            <div>
-              <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-200">
+                  Membership date
+                </label>
                 <input
-                  type="checkbox"
-                  checked={promotionIsWorker}
-                  onChange={(e) => setPromotionIsWorker(e.target.checked)}
-                  className="rounded border-slate-300 dark:border-slate-700"
+                  type="date"
+                  value={promotionDate}
+                  onChange={(e) => setPromotionDate(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-orange-500"
                 />
-                Member + Workforce
-              </label>
+              </div>
+              <div className="flex items-end">
+                <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={promotionIsWorker}
+                    onChange={(e) => setPromotionIsWorker(e.target.checked)}
+                    className="rounded border-slate-300 dark:border-slate-700"
+                  />
+                  Member + Workforce
+                </label>
+              </div>
             </div>
           </div>
 
@@ -243,12 +258,12 @@ export default function OnboardMemberPage() {
               disabled={promoting || promotableGuests.length === 0}
               className="inline-flex items-center rounded-md bg-orange-500 px-4 py-2 text-xs font-medium text-white shadow hover:bg-orange-600 disabled:opacity-50"
             >
-              {promoting ? 'Promoting...' : 'Promote to Member'}
+              {promoting ? 'Promoting…' : 'Promote to Member'}
             </button>
           </div>
         </form>
 
-        {/* New member creation */}
+        {/* ===== Right: Create New Member Directly ===== */}
         <form
           onSubmit={handleCreateMember}
           className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 shadow-sm space-y-4"
@@ -259,7 +274,7 @@ export default function OnboardMemberPage() {
                 Create New Member
               </h2>
               <p className="text-xs text-slate-500">
-                For people who skip the guest stage or join formally.
+                For people who join directly without passing through guest stage.
               </p>
             </div>
           </div>
@@ -268,9 +283,7 @@ export default function OnboardMemberPage() {
             <div className="text-xs text-red-600">{newMemberError}</div>
           )}
           {newMemberMessage && (
-            <div className="text-xs text-emerald-600">
-              {newMemberMessage}
-            </div>
+            <div className="text-xs text-emerald-600">{newMemberMessage}</div>
           )}
 
           <div className="grid gap-3 md:grid-cols-2">
@@ -308,6 +321,7 @@ export default function OnboardMemberPage() {
                   setNewMember((m) => ({ ...m, phone: e.target.value }))
                 }
                 className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-orange-500"
+                placeholder="+234..."
               />
             </div>
             <div>
@@ -402,6 +416,7 @@ export default function OnboardMemberPage() {
                   }))
                 }
                 className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-orange-500"
+                placeholder="Optional code or ID"
               />
             </div>
             <div className="md:col-span-2">
@@ -425,7 +440,7 @@ export default function OnboardMemberPage() {
               disabled={creating}
               className="inline-flex items-center rounded-md bg-orange-500 px-4 py-2 text-xs font-medium text-white shadow hover:bg-orange-600 disabled:opacity-50"
             >
-              {creating ? 'Saving...' : 'Create Member'}
+              {creating ? 'Saving…' : 'Create Member'}
             </button>
           </div>
         </form>
