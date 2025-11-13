@@ -1,134 +1,422 @@
 'use client';
 
-import { useState } from 'react';
-import { z } from 'zod';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Select, SelectItem, SelectTrigger, SelectContent, SelectValue } from '@/components/ui/select';
-import { createGuestFromConnectForm } from '@/lib/people';
-import { sendMessageToPerson } from '@/lib/communications';
-import { useRouter } from 'next/navigation';
+import { useState, FormEvent } from 'react';
+import { createGuest } from '@/lib/people';
+import type { CreateGuestInput } from '@/lib/people';
+import type { ReferralSource, GuestInterests } from '@/types';
 
-const stage1Schema = z.object({
-  firstName: z.string().min(2),
-  lastName: z.string().min(2),
-  phone: z.string().min(8),
-  email: z.string().email().optional(),
-  gender: z.string(),
-  dob: z.string(),
-});
+const REFERRAL_SOURCES: { value: ReferralSource; label: string }[] = [
+  { value: 'invited-by-friend', label: 'Invited by a friend' },
+  { value: 'social-media', label: 'Social media' },
+  { value: 'walk-in', label: 'Walk-in / pass-by' },
+  { value: 'online-service', label: 'Online service' },
+  { value: 'other', label: 'Other' },
+];
 
-const stage2Schema = z.object({
-  howHeard: z.string().min(1),
-  invitee: z.string().optional(),
-  spiritualInterests: z.array(z.string()),
-  communicationsConsent: z.boolean(),
-});
-
-const stage3Schema = z.object({
-  attendedWith: z.string().optional(),
-  preferredChannel: z.enum(['whatsapp', 'sms', 'call', 'email']),
-});
+const INTEREST_OPTIONS: { value: GuestInterests[number]; label: string }[] = [
+  'prayer',
+  'counselling',
+  'membership',
+  'cell-group',
+  'volunteering',
+  'discipleship',
+].map((v) => ({
+  value: v as GuestInterests[number],
+  label: v[0].toUpperCase() + v.slice(1),
+}));
 
 export default function ConnectPage() {
-  const router = useRouter();
+  const [step, setStep] = useState(1);
+  const [submitting, setSubmitting] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const [stage, setStage] = useState(1);
+  // Step 1 – personal details
+  const [personal, setPersonal] = useState({
+    firstName: '',
+    lastName: '',
+    gender: '',
+    dob: '',
+    phone: '',
+    email: '',
+  });
 
-  const [stage1, setStage1] = useState<any>({});
-  const [stage2, setStage2] = useState<any>({});
-  const [stage3, setStage3] = useState<any>({ preferredChannel: 'whatsapp' });
+  // Step 2 – visit & referral
+  const [visit, setVisit] = useState({
+    firstVisitDate: new Date().toISOString().slice(0, 10),
+    referralSource: 'walk-in' as ReferralSource,
+    referralName: '',
+    notes: '',
+  });
 
-  async function handleFinish() {
-    const data = {
-      ...stage1,
-      ...stage2,
-      ...stage3,
+  // Step 3 – interests & consent
+  const [interests, setInterests] = useState<GuestInterests>([]);
+  const [acceptComms, setAcceptComms] = useState(true);
+  const [preferredChannel, setPreferredChannel] = useState<
+    'whatsapp' | 'sms' | 'call' | 'email'
+  >('whatsapp');
+
+  const nextStep = () => setStep((s) => Math.min(3, s + 1));
+  const prevStep = () => setStep((s) => Math.max(1, s - 1));
+
+  const toggleInterest = (value: GuestInterests[number]) => {
+    setInterests((prev) =>
+      prev.includes(value) ? prev.filter((i) => i !== value) : [...prev, value]
+    );
+  };
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    if (!personal.firstName || !personal.lastName || !personal.phone) {
+      setErrorMessage('First name, last name, and phone are required.');
+      return;
+    }
+
+    const payload: CreateGuestInput = {
+      personalData: {
+        firstName: personal.firstName,
+        lastName: personal.lastName,
+        gender: personal.gender || undefined,
+        dob: personal.dob || undefined,
+        phone: personal.phone,
+        email: personal.email || undefined,
+        churchName: undefined,
+      },
+      referralSource: visit.referralSource,
+      referralName: visit.referralName || undefined,
+      interests,
+      firstVisitDate: new Date(visit.firstVisitDate).toISOString(),
+      tags: [],
+      primaryRmUserId: undefined,
+      secondaryRmUserIds: [],
+      isWorker: false,
+      // notes + preferredChannel + consent can be added to types later if needed
     };
 
-    const person = createGuestFromConnectForm(data);
-
-    // optional welcome message
-    sendMessageToPerson({
-      personId: person.id,
-      message: `Welcome ${person.firstName}! We're so glad you visited us today.`,
-      via: data.preferredChannel,
-    });
-
-    router.push('/guest/dashboard');
-  }
+    setSubmitting(true);
+    try {
+      createGuest(payload);
+      setSuccessMessage('Thank you! You have been registered as a first-time guest.');
+      // reset form
+      setStep(1);
+      setPersonal({
+        firstName: '',
+        lastName: '',
+        gender: '',
+        dob: '',
+        phone: '',
+        email: '',
+      });
+      setVisit({
+        firstVisitDate: new Date().toISOString().slice(0, 10),
+        referralSource: 'walk-in',
+        referralName: '',
+        notes: '',
+      });
+      setInterests([]);
+      setAcceptComms(true);
+      setPreferredChannel('whatsapp');
+    } catch (err: unknown) {
+      const error = err as Error;
+      setErrorMessage(error.message ?? 'Failed to register guest.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
-    <div className="max-w-lg mx-auto p-6">
-      <h1 className="text-xl font-semibold mb-4">Welcome! Let’s Get You Connected</h1>
+    <div className="min-h-screen flex items-start justify-center bg-slate-50 dark:bg-slate-950">
+      <div className="w-full max-w-xl mt-10 mb-10 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-6 space-y-6">
+        <header className="space-y-1 text-center">
+          <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+            Guest Connect
+          </h1>
+          <p className="text-sm text-slate-500">
+            Please fill this short form so our Relationship Team can serve you better.
+          </p>
+        </header>
 
-      {stage === 1 && (
-        <div className="space-y-4">
-          <Input placeholder="First Name" onChange={(e) => setStage1({ ...stage1, firstName: e.target.value })} />
-          <Input placeholder="Last Name" onChange={(e) => setStage1({ ...stage1, lastName: e.target.value })} />
-          <Input placeholder="Phone Number" onChange={(e) => setStage1({ ...stage1, phone: e.target.value })} />
-          <Input placeholder="Email (optional)" onChange={(e) => setStage1({ ...stage1, email: e.target.value })} />
-          <Select onValueChange={(v) => setStage1({ ...stage1, gender: v })}>
-            <SelectTrigger><SelectValue placeholder="Select Gender" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="male">Male</SelectItem>
-              <SelectItem value="female">Female</SelectItem>
-            </SelectContent>
-          </Select>
-          <Input type="date" onChange={(e) => setStage1({ ...stage1, dob: e.target.value })} />
-
-          <Button className="w-full" onClick={() => setStage(2)}>Next</Button>
+        {/* Step indicator */}
+        <div className="flex items-center justify-between text-xs">
+          <StepDot active={step === 1} label="Personal details" />
+          <StepDot active={step === 2} label="Visit & referral" />
+          <StepDot active={step === 3} label="Interests & consent" />
         </div>
-      )}
 
-      {stage === 2 && (
-        <div className="space-y-4">
-          <Input placeholder="How did you hear about us?"
-                 onChange={(e) => setStage2({ ...stage2, howHeard: e.target.value })} />
+        {errorMessage && (
+          <div className="text-xs text-red-600">{errorMessage}</div>
+        )}
+        {successMessage && (
+          <div className="text-xs text-emerald-600">
+            {successMessage}
+          </div>
+        )}
 
-          <Input placeholder="Were you invited by someone? (optional)"
-                 onChange={(e) => setStage2({ ...stage2, invitee: e.target.value })} />
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {/* STEP 1 */}
+          {step === 1 && (
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  First name *
+                </label>
+                <input
+                  value={personal.firstName}
+                  onChange={(e) =>
+                    setPersonal((p) => ({ ...p, firstName: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Last name *
+                </label>
+                <input
+                  value={personal.lastName}
+                  onChange={(e) =>
+                    setPersonal((p) => ({ ...p, lastName: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Phone number *
+                </label>
+                <input
+                  value={personal.phone}
+                  onChange={(e) =>
+                    setPersonal((p) => ({ ...p, phone: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                  placeholder="+234..."
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Email (optional)
+                </label>
+                <input
+                  type="email"
+                  value={personal.email}
+                  onChange={(e) =>
+                    setPersonal((p) => ({ ...p, email: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Gender
+                </label>
+                <select
+                  value={personal.gender}
+                  onChange={(e) =>
+                    setPersonal((p) => ({ ...p, gender: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="male">Male</option>
+                  <option value="female">Female</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Date of birth
+                </label>
+                <input
+                  type="date"
+                  value={personal.dob}
+                  onChange={(e) =>
+                    setPersonal((p) => ({ ...p, dob: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                />
+              </div>
+            </div>
+          )}
 
-          <Input placeholder="Spiritual Interests (comma separated)"
-                 onChange={(e) =>
-                   setStage2({
-                     ...stage2,
-                     spiritualInterests: e.target.value.split(',').map((x) => x.trim()),
-                   })
-                 } />
+          {/* STEP 2 */}
+          {step === 2 && (
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  When did you visit?
+                </label>
+                <input
+                  type="date"
+                  value={visit.firstVisitDate}
+                  onChange={(e) =>
+                    setVisit((v) => ({ ...v, firstVisitDate: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  How did you hear about us?
+                </label>
+                <select
+                  value={visit.referralSource}
+                  onChange={(e) =>
+                    setVisit((v) => ({
+                      ...v,
+                      referralSource: e.target.value as ReferralSource,
+                    }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                >
+                  {REFERRAL_SOURCES.map((r) => (
+                    <option key={r.value} value={r.value}>
+                      {r.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Who invited you? (optional)
+                </label>
+                <input
+                  value={visit.referralName}
+                  onChange={(e) =>
+                    setVisit((v) => ({ ...v, referralName: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                  placeholder="Name of the person who invited you"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Anything you would like us to know? (optional)
+                </label>
+                <textarea
+                  value={visit.notes}
+                  onChange={(e) =>
+                    setVisit((v) => ({ ...v, notes: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500 min-h-[80px]"
+                />
+              </div>
+            </div>
+          )}
 
-          <label className="flex items-center space-x-2">
-            <input type="checkbox"
-                   onChange={(e) =>
-                     setStage2({ ...stage2, communicationsConsent: e.target.checked })
-                   } />
-            <span>I consent to receive updates</span>
-          </label>
+          {/* STEP 3 */}
+          {step === 3 && (
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                  What are you interested in?
+                </label>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {INTEREST_OPTIONS.map((opt) => {
+                    const active = interests.includes(opt.value);
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => toggleInterest(opt.value)}
+                        className={`rounded-full border px-3 py-1 text-xs ${
+                          active
+                            ? 'border-orange-500 bg-orange-50 text-orange-700'
+                            : 'border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">
+                  Preferred way for us to reach you
+                </label>
+                <select
+                  value={preferredChannel}
+                  onChange={(e) =>
+                    setPreferredChannel(
+                      e.target.value as 'whatsapp' | 'sms' | 'call' | 'email'
+                    )
+                  }
+                  className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
+                >
+                  <option value="whatsapp">WhatsApp</option>
+                  <option value="sms">SMS</option>
+                  <option value="call">Phone call</option>
+                  <option value="email">Email</option>
+                </select>
+              </div>
+              <div>
+                <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={acceptComms}
+                    onChange={(e) => setAcceptComms(e.target.checked)}
+                    className="rounded border-slate-300 dark:border-slate-700"
+                  />
+                  I consent to receive communication from this church.
+                </label>
+              </div>
+            </div>
+          )}
 
-          <Button className="w-full" onClick={() => setStage(3)}>Next</Button>
-        </div>
-      )}
+          {/* Navigation buttons */}
+          <div className="flex justify-between pt-2">
+            <button
+              type="button"
+              disabled={step === 1}
+              onClick={prevStep}
+              className="inline-flex items-center rounded-md border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-900/40 disabled:opacity-50"
+            >
+              Previous
+            </button>
+            {step < 3 ? (
+              <button
+                type="button"
+                onClick={nextStep}
+                className="inline-flex items-center rounded-md bg-orange-500 px-4 py-2 text-xs font-medium text-white shadow hover:bg-orange-600"
+              >
+                Next
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={submitting}
+                className="inline-flex items-center rounded-md bg-orange-500 px-4 py-2 text-xs font-medium text-white shadow hover:bg-orange-600 disabled:opacity-50"
+              >
+                {submitting ? 'Saving…' : 'Finish & Submit'}
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
 
-      {stage === 3 && (
-        <div className="space-y-4">
-          <Input placeholder="Did anyone attend with you? (optional)"
-                 onChange={(e) =>
-                   setStage3({ ...stage3, attendedWith: e.target.value })
-                 } />
-
-          <Select onValueChange={(v) => setStage3({ ...stage3, preferredChannel: v })}>
-            <SelectTrigger><SelectValue placeholder="Preferred contact method" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="whatsapp">WhatsApp</SelectItem>
-              <SelectItem value="sms">SMS</SelectItem>
-              <SelectItem value="call">Call</SelectItem>
-              <SelectItem value="email">Email</SelectItem>
-            </SelectContent>
-          </Select>
-
-          <Button className="w-full" onClick={handleFinish}>Finish</Button>
-        </div>
-      )}
+function StepDot({ active, label }: { active: boolean; label: string }) {
+  return (
+    <div className="flex-1 flex items-center gap-2">
+      <div
+        className={`h-2 w-2 rounded-full ${
+          active ? 'bg-orange-500' : 'bg-slate-300 dark:bg-slate-700'
+        }`}
+      />
+      <span
+        className={`text-[11px] ${
+          active
+            ? 'text-slate-900 dark:text-slate-50 font-medium'
+            : 'text-slate-500'
+        }`}
+      >
+        {label}
+      </span>
     </div>
   );
 }
