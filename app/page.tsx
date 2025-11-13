@@ -36,3 +36,21 @@ export default function AdminDashboard() {
   );
 }
 import { UpcomingBirthdaysCard } from '@/components/dashboard/upcoming-birthdays-card';
+
+
+
+// app/page.tsx
+import { UpcomingBirthdaysCard } from '@/components/analytics/upcoming-birthdays-card';
+
+export default function DashboardPage() {
+  return (
+    <div className="p-6 space-y-6">
+      {/* ... your existing header / stats ... */}
+
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        <UpcomingBirthdaysCard />
+        {/* other cards/widgets */}
+      </div>
+    </div>
+  );
+}
