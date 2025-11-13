@@ -2,39 +2,41 @@
 
 import type { CommunicationChannel } from './communications';
 
-export type BroadcastStatus = 'draft' | 'scheduled' | 'sending' | 'completed' | 'failed';
+/**
+ * Segment keys used by the broadcast engine and UI.
+ * These are aligned with your guest/member evolution and workforce model.
+ */
+export type BroadcastSegmentKey =
+  | 'all-people'
+  // Members
+  | 'members-all'
+  | 'members-regular'
+  | 'members-adherent'
+  | 'members-returning'
+  | 'members-visiting'
+  // Guests
+  | 'guests-all'
+  | 'guests-first-time'
+  | 'guests-returning'
+  | 'guests-regular'
+  // Workers
+  | 'workers-all';
 
-export interface BroadcastSegment {
+/**
+ * A single broadcast send summary.
+ * We keep this lightweight and focused on analytics/history.
+ */
+export interface BroadcastRecord {
   id: string;
-  name: string;
-  description?: string;
-  // Implementation detail: this describes the filter; evaluated in code
-  criteria: Record<string, unknown>;
-}
+  createdAt: string;         // ISO timestamp
+  createdByUserId: string;   // Internal user that initiated the broadcast
 
-export interface Broadcast {
-  id: string;
-  name: string;
-  description?: string;
+  programId?: string;        // Optional – program this broadcast relates to
   channel: CommunicationChannel;
-  templateId?: string;
-  bodyOverride?: string;
-  segmentId: string;
-  scheduledFor?: string;         // ISO
-  status: BroadcastStatus;
-  createdAt: string;             // ISO
-  createdByUserId: string;
-  startedAt?: string;            // ISO
-  completedAt?: string;          // ISO
-}
+  segmentKey: BroadcastSegmentKey;
 
-export interface BroadcastRecipientLog {
-  id: string;
-  broadcastId: string;
-  personId: string;
-  channel: CommunicationChannel;
-  sentAt: string;                // ISO
-  providerMessageId?: string;
-  success: boolean;
-  errorMessage?: string;
+  messageBody: string;       // Final template used (with placeholders)
+  totalTargets: number;
+  successCount: number;
+  failureCount: number;
 }
