@@ -205,3 +205,22 @@ export default function PeoplePage() {
     </div>
   );
 }
+
+
+<td className="py-2 px-3 flex gap-2">
+  <button
+    type="button"
+    onClick={() => handleSelectPerson(person)}
+    className="inline-flex items-center rounded-md border border-orange-500 text-orange-600 px-2 py-1 text-xs font-medium hover:bg-orange-50 dark:hover:bg-orange-950/40"
+  >
+    Send WhatsApp
+  </button>
+
+  {/* NEW: View Profile button */}
+  <a
+    href={`/people/${person.id}`}
+    className="inline-flex items-center rounded-md border border-slate-400 text-slate-700 dark:text-slate-200 px-2 py-1 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-900/40"
+  >
+    View Profile
+  </a>
+</td>
