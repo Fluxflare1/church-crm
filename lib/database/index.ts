@@ -243,7 +243,7 @@ function loadState(): DatabaseState {
     return fresh;
   }
 
-  // Ensure config is present (in case of older version)
+  // Ensure config is present (for older versions)
   if (!state.config) {
     state.config = defaultSystemConfig;
   }
@@ -256,11 +256,7 @@ function saveState(mutated: DatabaseState): void {
   setItem(DB_STORAGE_KEY, mutated);
 }
 
-// ---- Public API -------------------------------------------------------------
-//
-// NOTE: These are synchronous because localStorage is synchronous. In practice
-// they will be wrapped by async services if/when calling serverless APIs.
-//
+// ---- Public API: snapshot ---------------------------------------------------
 
 export function getDatabaseSnapshot(): DatabaseState {
   return loadState();
