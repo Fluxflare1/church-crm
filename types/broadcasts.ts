@@ -2,10 +2,6 @@
 
 import type { CommunicationChannel } from './communications';
 
-/**
- * Segment keys used by the broadcast engine and UI.
- * These are aligned with your guest/member evolution and workforce model.
- */
 export type BroadcastSegmentKey =
   | 'all-people'
   // Members
@@ -22,20 +18,21 @@ export type BroadcastSegmentKey =
   // Workers
   | 'workers-all';
 
-/**
- * A single broadcast send summary.
- * We keep this lightweight and focused on analytics/history.
- */
 export interface BroadcastRecord {
   id: string;
-  createdAt: string;         // ISO timestamp
-  createdByUserId: string;   // Internal user that initiated the broadcast
+  createdAt: string; // ISO timestamp
+  createdByUserId: string;
 
-  programId?: string;        // Optional – program this broadcast relates to
+  programId?: string;
   channel: CommunicationChannel;
   segmentKey: BroadcastSegmentKey;
 
-  messageBody: string;       // Final template used (with placeholders)
+  /**
+   * Optional reference to a saved template used to generate this message.
+   */
+  templateId?: string;
+
+  messageBody: string;
   totalTargets: number;
   successCount: number;
   failureCount: number;
