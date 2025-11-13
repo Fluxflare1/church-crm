@@ -11,6 +11,7 @@ export interface BirthdayAutomationResult {
   processedPeople: number;
   birthdayCandidates: number;
   messagesSent: number;
+  followUpsCreated: number;
   skipped: boolean;
   reason?: string;
 }
@@ -26,30 +27,32 @@ interface BirthdayLog {
 /**
  * Run birthday automation for a given reference date (default: today).
  *
- * Logic:
- * - targetDate = referenceDate + config.birthdays.daysBefore
- * - For each person with DOB (month/day) == targetDate (month/day):
- *   - Check if we've already sent for this year (birthdayLogs table)
- *   - If not, send via communications engine and log it
+ * Uses SystemConfig.birthdays (BirthdayMessagingConfig):
+ * - enabled
+ * - leadTimeDays
+ * - defaultChannel
+ * - sendAutomatically
+ * - followUpType
+ * - messageTemplateId
  */
 export function runBirthdayAutomation(
   referenceDate: Date = new Date()
 ): BirthdayAutomationResult {
-  const config = getSystemConfig();
+  const cfg = getSystemConfig();
+  const birthdaysCfg = cfg.birthdays;
 
-  if (!config.birthdays || !config.birthdays.enabled) {
+  if (!birthdaysCfg?.enabled) {
     return {
       processedPeople: 0,
       birthdayCandidates: 0,
       messagesSent: 0,
+      followUpsCreated: 0,
       skipped: true,
       reason: 'Birthdays automation disabled in SystemConfig.birthdays.',
     };
   }
 
-  const { daysBefore = 0, defaultChannel, messageTemplate } = config.birthdays;
-
-  const targetDate = addDays(stripTime(referenceDate), daysBefore);
+  const targetDate = addDays(stripTime(referenceDate), birthdaysCfg.leadTimeDays || 0);
   const targetMonth = targetDate.getMonth() + 1; // 1–12
   const targetDay = targetDate.getDate();
   const targetYear = targetDate.getFullYear();
@@ -57,9 +60,14 @@ export function runBirthdayAutomation(
   const allPeople = getAllPeople();
   const logs = db.getTable<BirthdayLog>('birthdayLogs') ?? [];
 
+  // If you already have a FollowUpRecord type defined, we reuse it:
+  type FollowUpRecord = import('@/types').FollowUpRecord;
+  const followUps = db.getTable<FollowUpRecord>('followUps') ?? [];
+
   let processed = 0;
   let candidates = 0;
-  let sent = 0;
+  let messagesSent = 0;
+  let followUpsCreated = 0;
 
   for (const person of allPeople) {
     processed++;
@@ -73,55 +81,80 @@ export function runBirthdayAutomation(
     const dobMonth = dob.getMonth() + 1;
     const dobDay = dob.getDate();
 
-    // Only match month + day (year doesn't matter)
+    // Only match month + day (year does not matter)
     if (dobMonth !== targetMonth || dobDay !== targetDay) {
       continue;
     }
 
     candidates++;
 
-    // Avoid sending more than once per year
-    const alreadySent = logs.some(
+    // Avoid sending/creating more than once per year
+    const alreadyLogged = logs.some(
       (log) => log.personId === person.id && log.year === targetYear
     );
-    if (alreadySent) continue;
+    if (alreadyLogged) continue;
 
-    const channel: CommunicationChannel = defaultChannel ?? 'whatsapp';
-    const body = personaliseBirthdayTemplate(messageTemplate, person);
+    if (birthdaysCfg.sendAutomatically) {
+      // Auto-send via communications engine
+      const channel: CommunicationChannel =
+        birthdaysCfg.defaultChannel ?? 'whatsapp';
 
-    // Fire-and-forget; if you want strict error handling, you can await and catch
-    void sendMessageToPerson({
-      personId: person.id,
-      channel,
-      templateId: undefined,
-      bodyOverride: body,
-      initiatedByUserId: 'system-birthday-automation',
-      context: {
+      void sendMessageToPerson({
+        personId: person.id,
+        channel,
+        templateId: birthdaysCfg.messageTemplateId,
+        bodyOverride: undefined,
+        initiatedByUserId: 'system-birthday-automation',
+        context: { reason: 'birthday', year: targetYear },
+      });
+
+      messagesSent++;
+    } else {
+      // Create a follow-up instead of auto-sending
+      const followUpType = birthdaysCfg.followUpType || 'birthday';
+      const dueAt = new Date(targetDate);
+      // you could offset dueAt by a few hours if needed
+
+      const newFollowUp: FollowUpRecord = {
+        id: crypto.randomUUID(),
+        personId: person.id,
+        type: followUpType,
         reason: 'birthday',
-        year: targetYear,
-      },
-    });
+        priority: 'low',
+        status: 'open',
+        createdAt: new Date().toISOString(),
+        dueAt: dueAt.toISOString(),
+        assignedRmUserId: person.relationship?.primaryRmUserId ?? null,
+        metadata: {
+          year: targetYear,
+        },
+      };
 
+      followUps.push(newFollowUp);
+      followUpsCreated++;
+    }
+
+    // Record we handled this person for this year
     const newLog: BirthdayLog = {
       id: crypto.randomUUID(),
       personId: person.id,
       year: targetYear,
-      channel,
+      channel: birthdaysCfg.defaultChannel as CommunicationChannel,
       sentAt: new Date().toISOString(),
     };
-
     logs.push(newLog);
-    sent++;
   }
 
-  if (sent > 0) {
+  if (messagesSent > 0 || followUpsCreated > 0) {
     db.setTable<BirthdayLog>('birthdayLogs', logs);
+    db.setTable('followUps', followUps);
   }
 
   return {
     processedPeople: processed,
     birthdayCandidates: candidates,
-    messagesSent: sent,
+    messagesSent,
+    followUpsCreated,
     skipped: false,
   };
 }
@@ -138,18 +171,4 @@ function addDays(d: Date, delta: number): Date {
   const copy = new Date(d);
   copy.setDate(copy.getDate() + delta);
   return copy;
-}
-
-function personaliseBirthdayTemplate(template: string, person: Person): string {
-  const context: Record<string, string | undefined> = {
-    firstName: person.personalData.firstName,
-    lastName: person.personalData.lastName,
-    fullName: `${person.personalData.firstName} ${person.personalData.lastName}`,
-    churchName: person.personalData.churchName,
-  };
-
-  return template.replace(/{{\s*([\w.]+)\s*}}/g, (match, key) => {
-    const val = context[key];
-    return val !== undefined && val !== null ? String(val) : '';
-  });
 }
