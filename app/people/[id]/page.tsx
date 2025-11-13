@@ -35,7 +35,6 @@ export default function PersonProfilePage({ params }: PersonProfilePageProps) {
 
   useEffect(() => {
     setLoading(true);
-
     try {
       const p = getPersonById(id);
       if (!p) {
@@ -60,7 +59,7 @@ export default function PersonProfilePage({ params }: PersonProfilePageProps) {
           return bKey.localeCompare(aKey);
         });
 
-      setFollowUps(personFollowUps.slice(0, 5)); // show the most recent 5
+      setFollowUps(personFollowUps.slice(0, 5)); // show most recent 5
 
       const actionsMap: Record<string, FollowUpActionLogEntry[]> = {};
       for (const fu of personFollowUps) {
@@ -88,12 +87,18 @@ export default function PersonProfilePage({ params }: PersonProfilePageProps) {
   const attendanceHistory: AttendanceHistoryEntry[] = useMemo(() => {
     if (!person) return [];
     const history = person.evolution.attendanceHistory ?? [];
-    return [...history].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8);
+    return [...history]
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 8);
   }, [person]);
 
   const birthdayInfo = useMemo(() => {
-    if (!person?.personalData.dateOfBirth) return null;
-    return computeNextBirthdayInfo(person.personalData.dateOfBirth);
+    if (!person) return null;
+    // Handle both dateOfBirth and legacy dob if present
+    const dobIso =
+      (person.personalData as any).dob || person.personalData.dateOfBirth;
+    if (!dobIso) return null;
+    return computeNextBirthdayInfo(dobIso);
   }, [person]);
 
   if (loading) {
@@ -142,7 +147,7 @@ export default function PersonProfilePage({ params }: PersonProfilePageProps) {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Back + heading */}
+      {/* Back button */}
       <div className="flex items-center justify-between gap-3">
         <button
           type="button"
@@ -209,9 +214,9 @@ export default function PersonProfilePage({ params }: PersonProfilePageProps) {
         </div>
       </div>
 
-      {/* Summary + engagement */}
+      {/* Summary + assignment */}
       <div className="grid gap-4 md:grid-cols-[2fr,1.4fr]">
-        {/* Summary card */}
+        {/* Attendance & evolution */}
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <h2 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-100">
             Attendance & Evolution
@@ -241,8 +246,8 @@ export default function PersonProfilePage({ params }: PersonProfilePageProps) {
                 This person is currently a{' '}
                 <span className="font-medium">{roleBadge.toLowerCase()}</span>.{' '}
                 {readyForPromotion
-                  ? 'They meet the promotion criteria based on SystemConfig.evolution thresholds.'
-                  : 'Promotion criteria to member will follow your configured thresholds.'}
+                  ? 'They meet the promotion criteria based on your SystemConfig.evolution thresholds.'
+                  : 'Promotion to member depends on your configured thresholds.'}
               </p>
             )}
             {isMember && (
@@ -296,7 +301,7 @@ export default function PersonProfilePage({ params }: PersonProfilePageProps) {
         </div>
       </div>
 
-      {/* Attendance + Follow-ups */}
+      {/* Attendance history + follow-ups */}
       <div className="grid gap-4 lg:grid-cols-[1.4fr,1.6fr]">
         {/* Attendance history */}
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -541,8 +546,7 @@ function computeNextBirthday(dob: Date, today: Date): Date {
   return new Date(year + 1, month, day);
 }
 
-function computeNextBirthdayInfo(dobIso: string | undefined) {
-  if (!dobIso) return null;
+function computeNextBirthdayInfo(dobIso: string) {
   const dob = new Date(dobIso);
   if (Number.isNaN(dob.getTime())) return null;
 
