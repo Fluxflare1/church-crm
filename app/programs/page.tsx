@@ -5,6 +5,7 @@ import {
   createProgram,
   getUpcomingPrograms,
   getPastPrograms,
+  getAllPrograms,
 } from '@/lib/programs';
 
 import type { Program, ProgramType, ProgramStatus } from '@/types';
@@ -348,6 +349,7 @@ export default function ProgramsPage() {
                       <th className="px-3 py-2 font-medium">Status</th>
                       <th className="px-3 py-2 font-medium">Expected</th>
                       <th className="px-3 py-2 font-medium">Location</th>
+                      <th className="px-3 py-2 font-medium">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -379,6 +381,14 @@ export default function ProgramsPage() {
                         <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
                           {p.location ?? '—'}
                         </td>
+                        <td className="px-3 py-2">
+                          <a
+                            href={`/broadcast?programId=${p.id}`}
+                            className="inline-flex items-center rounded-md border border-orange-500 px-2 py-1 text-[11px] font-medium text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-950/40"
+                          >
+                            Broadcast
+                          </a>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -405,6 +415,7 @@ export default function ProgramsPage() {
                       <th className="px-3 py-2 font-medium">Date</th>
                       <th className="px-3 py-2 font-medium">Status</th>
                       <th className="px-3 py-2 font-medium">Expected</th>
+                      <th className="px-3 py-2 font-medium">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -429,6 +440,14 @@ export default function ProgramsPage() {
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
                           {p.expectedAttendance ?? '—'}
+                        </td>
+                        <td className="px-3 py-2">
+                          <a
+                            href={`/broadcast?programId=${p.id}`}
+                            className="inline-flex items-center rounded-md border border-orange-500 px-2 py-1 text-[11px] font-medium text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-950/40"
+                          >
+                            Broadcast
+                          </a>
                         </td>
                       </tr>
                     ))}
