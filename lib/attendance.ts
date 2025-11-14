@@ -5,6 +5,7 @@ import { getAllPeople } from './people';
 import { getAllPrograms } from './programs';
 import { getSystemConfig } from './config';
 import { createAbsenteeFollowUps, AbsenteeDetected } from './follow-ups';
+import { createNotificationForEvent } from './notifications';
 
 import type {
   AttendanceRecord,
@@ -12,6 +13,7 @@ import type {
   Person,
   Program,
   SystemConfig,
+  FollowUp,
 } from '@/types';
 
 const STORAGE_KEY = 'church-crm:attendance';
@@ -209,8 +211,6 @@ export function runAbsenteeAutomation(options?: {
         missedProgramIds.push(programId);
       } else if (rec.status === 'absent') {
         missedProgramIds.push(programId);
-      } else {
-        // present or excused => not counted as missed
       }
     }
 
@@ -223,9 +223,29 @@ export function runAbsenteeAutomation(options?: {
   }
 
   let followUpsCreated = 0;
+
   if (!options?.dryRun && absentees.length > 0 && rule.createFollowUp) {
-    const created = createAbsenteeFollowUps(absentees, { createdByUserId });
+    const created: FollowUp[] = createAbsenteeFollowUps(absentees, {
+      createdByUserId,
+    });
     followUpsCreated = created.length;
+
+    // 🔔 Create notifications for each new follow-up
+    for (const fu of created) {
+      createNotificationForEvent('followUpAssigned', {
+        title: fu.title,
+        message:
+          fu.description ??
+          'A new absentee follow-up has been created and assigned.',
+        personId: fu.personId,
+        followUpId: fu.id,
+        programId: fu.programId,
+        severity: 'warning',
+        meta: {
+          reason: 'absentee',
+        },
+      });
+    }
   }
 
   return {
