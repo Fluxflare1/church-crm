@@ -1,12 +1,9 @@
 import { NextResponse } from 'next/server';
-import { runAbsenteeAutomation } from '@/lib/attendance';
+import { runAbsenteeDetection } from '@/lib/follow-ups';
 
-export async function POST() {
+async function handle() {
   try {
-    const result = runAbsenteeAutomation({
-      createdByUserId: 'system', // TODO: replace with real user from auth
-    });
-
+    const result = await runAbsenteeDetection(new Date());
     return NextResponse.json(
       {
         ok: true,
@@ -14,14 +11,22 @@ export async function POST() {
       },
       { status: 200 },
     );
-  } catch (err: unknown) {
-    const e = err as Error;
+  } catch (err) {
+    console.error('Absentee cron failed', err);
     return NextResponse.json(
       {
         ok: false,
-        error: e.message ?? 'Failed to run absentee automation.',
+        error: 'Absentee detection failed',
       },
       { status: 500 },
     );
   }
+}
+
+export async function GET() {
+  return handle();
+}
+
+export async function POST() {
+  return handle();
 }
