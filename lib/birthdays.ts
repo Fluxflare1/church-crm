@@ -1,242 +1,232 @@
-// lib/birthday.ts
+'use client';
 
-import { getSystemConfig } from './config';
-import { getAllPeople } from './people';
-import { db } from './database';
+import { getAllPeople, savePerson } from './people';
+import { getSystemConfig, updateSystemConfig } from './config';
 import { sendMessageToPerson } from './communications';
+import { createFollowUp } from './follow-ups';
 
-import type { Person, CommunicationChannel, FollowUpRecord } from '@/types';
+import type {
+  Person,
+  SystemConfig,
+  BirthdayMessagingConfig,
+  CommunicationChannel,
+} from '@/types';
 
-export interface BirthdayAutomationResult {
-  processedPeople: number;
-  birthdayCandidates: number;
-  messagesSent: number;
-  followUpsCreated: number;
-  skipped: boolean;
-  reason?: string;
+export interface BirthdayAutomationPersonResult {
+  personId: string;
+  channel: CommunicationChannel | null;
+  sent: boolean;
+  followUpCreated: boolean;
+  error?: string;
 }
 
-interface BirthdayLog {
-  id: string;
-  personId: string;
-  year: number;
-  channel: CommunicationChannel;
-  sentAt: string;
+export interface BirthdayAutomationResult {
+  configEnabled: boolean;
+  consideredCount: number;
+  scheduledCount: number;
+  sentCount: number;
+  followUpsCreated: number;
+  details: BirthdayAutomationPersonResult[];
 }
 
 /**
- * Run birthday automation for a given reference date (default: today).
- *
- * Uses SystemConfig.birthdays (BirthdayMessagingConfig):
- * - enabled
- * - leadTimeDays
- * - defaultChannel
- * - sendAutomatically
- * - followUpType
- * - messageTemplateId
+ * Run birthday detection and either send messages or create follow-ups,
+ * depending on SystemConfig.birthdays.
  */
-export function runBirthdayAutomation(
-  referenceDate: Date = new Date()
-): BirthdayAutomationResult {
-  const cfg = getSystemConfig();
-  const birthdaysCfg = cfg.birthdays;
+export async function runBirthdayAutomation(options?: {
+  now?: Date;
+  dryRun?: boolean;
+  createdByUserId?: string;
+}): Promise<BirthdayAutomationResult> {
+  const now = options?.now ?? new Date();
+  const cfg: SystemConfig = getSystemConfig();
+  const birthdaysCfg: BirthdayMessagingConfig = cfg.birthdays;
 
-  if (!birthdaysCfg?.enabled) {
+  if (!birthdaysCfg.enabled) {
     return {
-      processedPeople: 0,
-      birthdayCandidates: 0,
-      messagesSent: 0,
+      configEnabled: false,
+      consideredCount: 0,
+      scheduledCount: 0,
+      sentCount: 0,
       followUpsCreated: 0,
-      skipped: true,
-      reason: 'Birthdays automation disabled in SystemConfig.birthdays.',
+      details: [],
     };
   }
 
-  const targetDate = addDays(stripTime(referenceDate), birthdaysCfg.leadTimeDays || 0);
-  const targetMonth = targetDate.getMonth() + 1; // 1–12
-  const targetDay = targetDate.getDate();
-  const targetYear = targetDate.getFullYear();
+  const people = getAllPeople();
+  const results: BirthdayAutomationPersonResult[] = [];
 
-  const allPeople = getAllPeople();
-  const logs = db.getTable<BirthdayLog>('birthdayLogs') ?? [];
-  const followUps = db.getTable<FollowUpRecord>('followUps') ?? [];
+  const today = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  ).getTime();
 
-  let processed = 0;
-  let candidates = 0;
-  let messagesSent = 0;
+  const leadMillis = birthdaysCfg.leadTimeDays * 24 * 60 * 60 * 1000;
+
+  let scheduledCount = 0;
+  let sentCount = 0;
   let followUpsCreated = 0;
 
-  for (const person of allPeople) {
-    processed++;
+  for (const person of people) {
+    const dob = person.personalData.dob;
+    if (!dob) continue;
 
-    const dobISO = person.personalData.dob;
-    if (!dobISO) continue;
+    const dobDate = new Date(dob);
+    if (Number.isNaN(dobDate.getTime())) continue;
 
-    const dob = new Date(dobISO);
-    if (isNaN(dob.getTime())) continue;
+    const birthdayThisYear = new Date(
+      now.getFullYear(),
+      dobDate.getMonth(),
+      dobDate.getDate(),
+    );
 
-    const dobMonth = dob.getMonth() + 1;
-    const dobDay = dob.getDate();
+    // target date when we should act
+    const targetTime = birthdayThisYear.getTime() - leadMillis;
 
-    // Only match month + day (year does not matter)
-    if (dobMonth !== targetMonth || dobDay !== targetDay) {
+    // ignore birthdays already passed (with lead time)
+    if (targetTime > today) continue;
+
+    // we don't want to run for dates long in the past either:
+    const maxLagMillis = 2 * 24 * 60 * 60 * 1000;
+    if (today - targetTime > maxLagMillis) {
       continue;
     }
 
-    candidates++;
-
-    // Avoid sending/creating more than once per year
-    const alreadyLogged = logs.some(
-      (log) => log.personId === person.id && log.year === targetYear
-    );
-    if (alreadyLogged) continue;
-
-    if (birthdaysCfg.sendAutomatically) {
-      // Auto-send via communications engine
-      const channel: CommunicationChannel =
-        birthdaysCfg.defaultChannel ?? 'whatsapp';
-
-      void sendMessageToPerson({
-        personId: person.id,
-        channel,
-        templateId: birthdaysCfg.messageTemplateId,
-        bodyOverride: undefined,
-        initiatedByUserId: 'system-birthday-automation',
-        context: { reason: 'birthday', year: targetYear },
-      });
-
-      messagesSent++;
-    } else {
-      // Create a follow-up instead of auto-sending
-      const followUpType = birthdaysCfg.followUpType || 'birthday';
-      const dueAt = new Date(targetDate);
-
-      const newFollowUp: FollowUpRecord = {
-        id: crypto.randomUUID(),
-        personId: person.id,
-        type: followUpType,
-        reason: 'birthday',
-        priority: 'low',
-        status: 'open',
-        createdAt: new Date().toISOString(),
-        dueAt: dueAt.toISOString(),
-        assignedRmUserId: person.relationship?.primaryRmUserId ?? null,
-        metadata: {
-          year: targetYear,
-        },
-      };
-
-      followUps.push(newFollowUp);
-      followUpsCreated++;
+    // Prevent duplicate sends in same year
+    const lastYear = person.evolution?.lastBirthdayMessageYear;
+    if (lastYear === now.getFullYear()) {
+      continue;
     }
 
-    // Record we handled this person for this year
-    const newLog: BirthdayLog = {
-      id: crypto.randomUUID(),
-      personId: person.id,
-      year: targetYear,
-      channel: birthdaysCfg.defaultChannel as CommunicationChannel,
-      sentAt: new Date().toISOString(),
-    };
-    logs.push(newLog);
-  }
+    scheduledCount += 1;
 
-  if (messagesSent > 0 || followUpsCreated > 0) {
-    db.setTable<BirthdayLog>('birthdayLogs', logs);
-    db.setTable('followUps', followUps);
-  }
+    if (options?.dryRun) {
+      results.push({
+        personId: person.id,
+        channel: birthdaysCfg.defaultChannel,
+        sent: false,
+        followUpCreated: false,
+      });
+      continue;
+    }
 
-  return {
-    processedPeople: processed,
-    birthdayCandidates: candidates,
-    messagesSent,
-    followUpsCreated,
-    skipped: false,
-  };
-}
+    // Determine channel
+    const channel: CommunicationChannel = birthdaysCfg.defaultChannel;
 
-// -----------------------------------------------------------------------------
-// Upcoming birthdays helper for dashboard cards
-// -----------------------------------------------------------------------------
+    let sent = false;
+    let fuCreated = false;
+    let error: string | undefined;
 
-export interface UpcomingBirthday {
-  personId: string;
-  fullName: string;
-  dob: string;
-  nextBirthdayDate: string; // ISO
-  daysUntil: number;
-  isToday: boolean;
-  category: Person['category'];
-}
+    try {
+      if (birthdaysCfg.sendAutomatically) {
+        const messageBody = await buildBirthdayMessage(person, cfg);
+        const res = await sendMessageToPerson({
+          personId: person.id,
+          channel,
+          templateId: birthdaysCfg.messageTemplateId || undefined,
+          bodyOverride: messageBody,
+          initiatedByUserId: options?.createdByUserId ?? 'system',
+          context: {
+            automation: 'birthday',
+            year: now.getFullYear(),
+          },
+        });
 
-/**
- * Returns upcoming birthdays in the next `daysAhead` days (inclusive).
- * Uses local time (browser/server default).
- */
-export function getUpcomingBirthdays(daysAhead: number = 7): UpcomingBirthday[] {
-  const allPeople = getAllPeople();
-  const today = stripTime(new Date());
+        if (res.success) {
+          sent = true;
+          sentCount += 1;
+        } else {
+          error = res.errorMessage ?? 'Failed to send birthday message.';
+        }
+      } else {
+        // create a follow-up instead of direct send
+        const title = `Birthday follow-up: ${person.personalData.firstName ?? ''} ${
+          person.personalData.lastName ?? ''
+        }`.trim();
+        const description =
+          'Send a personalised birthday greeting and prayer to this person.';
 
-  const results: UpcomingBirthday[] = [];
+        createFollowUp({
+          personId: person.id,
+          type: birthdaysCfg.followUpType as any,
+          title,
+          description,
+          createdByUserId: options?.createdByUserId ?? 'system',
+          priority: 'medium',
+          meta: {
+            birthdayYear: now.getFullYear(),
+          },
+        });
 
-  for (const person of allPeople) {
-    const dobISO = person.personalData.dob;
-    if (!dobISO) continue;
+        fuCreated = true;
+        followUpsCreated += 1;
+      }
 
-    const dob = new Date(dobISO);
-    if (isNaN(dob.getTime())) continue;
-
-    const next = computeNextBirthday(dob, today);
-    const daysUntil = diffInDays(today, next);
-    if (daysUntil < 0 || daysUntil > daysAhead) continue;
+      // Persist lastBirthdayMessageYear
+      const updated: Person = {
+        ...person,
+        evolution: {
+          ...(person.evolution ?? {}),
+          lastBirthdayMessageYear: now.getFullYear(),
+        },
+      };
+      savePerson(updated);
+    } catch (err: unknown) {
+      const e = err as Error;
+      error = e.message ?? 'Birthday automation error.';
+    }
 
     results.push({
       personId: person.id,
-      fullName: `${person.personalData.firstName} ${person.personalData.lastName}`,
-      dob: dob.toISOString(),
-      nextBirthdayDate: next.toISOString(),
-      daysUntil,
-      isToday: daysUntil === 0,
-      category: person.category,
+      channel,
+      sent,
+      followUpCreated: fuCreated,
+      error,
     });
   }
 
-  // Sort: soonest first, then by name
-  results.sort((a, b) => {
-    if (a.daysUntil !== b.daysUntil) return a.daysUntil - b.daysUntil;
-    return a.fullName.localeCompare(b.fullName);
-  });
-
-  return results;
+  return {
+    configEnabled: true,
+    consideredCount: people.length,
+    scheduledCount,
+    sentCount,
+    followUpsCreated,
+    details: results,
+  };
 }
 
-// ----------------- helpers -----------------
+/* -------------------------------------------------------------------------- */
+/*  Helpers                                                                   */
+/* -------------------------------------------------------------------------- */
 
-function stripTime(d: Date): Date {
-  const copy = new Date(d);
-  copy.setHours(0, 0, 0, 0);
-  return copy;
-}
+async function buildBirthdayMessage(
+  person: Person,
+  cfg: SystemConfig,
+): Promise<string> {
+  // Use template referenced in cfg.birthdays.messageTemplateId (from broadcastTemplates)
+  const tmplId = cfg.birthdays.messageTemplateId;
+  const template =
+    cfg.communications.broadcastTemplates?.find((t) => t.id === tmplId) ?? null;
 
-function addDays(d: Date, delta: number): Date {
-  const copy = new Date(d);
-  copy.setDate(copy.getDate() + delta);
-  return copy;
-}
+  const bodyTemplate =
+    template?.bodyTemplate ||
+    `Happy Birthday {{firstName}}! We celebrate you today at {{churchName}} and pray that this new year will be full of God’s grace.`;
 
-function diffInDays(a: Date, b: Date): number {
-  const ms = stripTime(b).getTime() - stripTime(a).getTime();
-  return Math.round(ms / (1000 * 60 * 60 * 24));
-}
+  const fullName = `${person.personalData.firstName ?? ''} ${
+    person.personalData.lastName ?? ''
+  }`.trim();
 
-function computeNextBirthday(dob: Date, today: Date): Date {
-  const year = today.getFullYear();
-  const month = dob.getMonth(); // 0–11
-  const day = dob.getDate(); // 1–31
+  const replacements: Record<string, string> = {
+    '{{firstName}}': person.personalData.firstName ?? '',
+    '{{lastName}}': person.personalData.lastName ?? '',
+    '{{fullName}}': fullName,
+    '{{churchName}}': cfg.systemInfo.churchName ?? 'church',
+  };
 
-  const thisYear = new Date(year, month, day);
-  if (thisYear >= stripTime(today)) {
-    return thisYear;
+  let result = bodyTemplate;
+  for (const [token, value] of Object.entries(replacements)) {
+    result = result.split(token).join(value);
   }
-  return new Date(year + 1, month, day);
+  return result;
 }
