@@ -1,3 +1,4 @@
+
 {
   "name": "Church Attendance & Relationship Management",
   "short_name": "Church CRM",
@@ -7,6 +8,18 @@
   "background_color": "#ffffff",
   "theme_color": "#c41e3a",
   "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
   "categories": ["business", "productivity"],
   "lang": "en-US"
 }
