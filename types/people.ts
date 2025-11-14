@@ -111,3 +111,8 @@ export interface Person {
   createdAt: string;            // ISO
   updatedAt: string;            // ISO
 }
+
+
+
+// Inside Person engagement/evolution-ish block, add this optional:
+lastBirthdayMessageYear?: number;
