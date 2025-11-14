@@ -1,8 +1,6 @@
-
 'use client';
 
 import { useEffect, useState } from 'react';
-
 import { getAllPeople } from '@/lib/people';
 import { getAllPrograms } from '@/lib/programs';
 import { getAllFollowUps } from '@/lib/follow-ups';
@@ -16,17 +14,28 @@ interface UpcomingBirthday {
   daysUntil: number;
 }
 
-export default function MainDashboardPage() {
+export default function DashboardPage() {
   const [people, setPeople] = useState<Person[]>([]);
   const [programs, setPrograms] = useState<Program[]>([]);
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [config, setConfig] = useState<SystemConfig | null>(null);
 
   useEffect(() => {
+    // Load local data
     setPeople(getAllPeople());
     setPrograms(getAllPrograms());
     setFollowUps(getAllFollowUps());
     setConfig(getSystemConfig());
+
+    // Fire-and-forget absentee detection
+    void fetch('/api/cron/absentee').catch(() => {
+      // Silent fail – dashboard should not break if this fails
+    });
+
+    // Fire-and-forget birthday automation
+    void fetch('/api/cron/birthdays').catch(() => {
+      // Silent fail – dashboard should not break if this fails
+    });
   }, []);
 
   const timezone = config?.systemInfo.timezone ?? 'Africa/Lagos';
@@ -49,13 +58,14 @@ export default function MainDashboardPage() {
           Dashboard
         </h1>
         <p className="mt-1 text-sm text-slate-500">
-          Overview of programs, follow-ups, upcoming birthdays, and key CRM signals.
+          Overview of programs, follow-ups, upcoming birthdays, and key CRM
+          signals.
         </p>
       </div>
 
       {/* Cards row */}
       <div className="grid gap-4 md:grid-cols-3">
-        {/* Today's programs */}
+        {/* Today&apos;s programs */}
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
             Today&apos;s programs
@@ -245,61 +255,4 @@ function formatBirthday(date: Date): string {
     month: 'short',
     day: 'numeric',
   });
-}
-
-'use client';
-
-import { useEffect } from 'react';
-
-export default function DashboardPage() {
-  useEffect(() => {
-    // Fire-and-forget absentee detection on dashboard load
-    void fetch('/api/cron/absentee').catch(() => {
-      // Silent fail – dashboard should not break if this fails
-    });
-  }, []);
-
-  return (
-    <div className="p-6">
-      {/* ... existing dashboard content ... */}
-    </div>
-  );
-}
-
-// Example: app/admin/page.tsx or app/page.tsx (admin dashboard)
-
-
-import { useEffect } from 'react';
-
-export default function AdminDashboard() {
-  useEffect(() => {
-    void fetch('/api/cron/birthdays').catch(() => {
-      // silent fail; don't block dashboard
-    });
-  }, []);
-
-  return (
-    <div className="p-6">
-      {/* ... existing dashboard content ... */}
-    </div>
-  );
-}
-import { UpcomingBirthdaysCard } from '@/components/dashboard/upcoming-birthdays-card';
-
-
-
-// app/page.tsx
-import { UpcomingBirthdaysCard } from '@/components/analytics/upcoming-birthdays-card';
-
-export default function DashboardPage() {
-  return (
-    <div className="p-6 space-y-6">
-      {/* ... your existing header / stats ... */}
-
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-        <UpcomingBirthdaysCard />
-        {/* other cards/widgets */}
-      </div>
-    </div>
-  );
 }
