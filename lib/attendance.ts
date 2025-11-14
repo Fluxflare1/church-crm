@@ -81,10 +81,12 @@ export interface MarkAttendanceInput {
   status: AttendanceStatus; // 'present' | 'absent' | 'excused' etc.
   timestamp?: string;
   markedByUserId: string;
+  tallyId?: string;
 }
 
 /**
  * Mark or update a person’s attendance for a program.
+ * Upserts based on (programId, personId).
  */
 export function markAttendance(input: MarkAttendanceInput): AttendanceRecord {
   const now = new Date().toISOString();
@@ -104,6 +106,7 @@ export function markAttendance(input: MarkAttendanceInput): AttendanceRecord {
       timestamp: ts,
       updatedAt: now,
       markedByUserId: input.markedByUserId,
+      tallyId: input.tallyId ?? list[existingIndex].tallyId,
     };
     list[existingIndex] = record;
   } else {
@@ -116,6 +119,7 @@ export function markAttendance(input: MarkAttendanceInput): AttendanceRecord {
       createdAt: now,
       updatedAt: now,
       markedByUserId: input.markedByUserId,
+      tallyId: input.tallyId,
     };
     list.push(record);
   }
@@ -167,7 +171,6 @@ export function runAbsenteeAutomation(options?: {
   const allAttendance = getAllAttendanceRecords();
   const allPeople = getAllPeople();
 
-  // Programs within window and matching optional types
   const cutoff = new Date(
     now.getTime() - rule.withinDays * 24 * 60 * 60 * 1000,
   );
@@ -186,7 +189,6 @@ export function runAbsenteeAutomation(options?: {
 
   const consideredProgramIds = new Set(relevantPrograms.map((p) => p.id));
 
-  // Filter people by scope
   const trackedPeople = allPeople.filter((person) =>
     isPersonTrackedByScope(person, rule.scope),
   );
@@ -207,7 +209,6 @@ export function runAbsenteeAutomation(options?: {
       const rec = attendanceByKey.get(key);
 
       if (!rec) {
-        // No record at all => treat as missed
         missedProgramIds.push(programId);
       } else if (rec.status === 'absent') {
         missedProgramIds.push(programId);
@@ -230,7 +231,6 @@ export function runAbsenteeAutomation(options?: {
     });
     followUpsCreated = created.length;
 
-    // 🔔 Create notifications for each new follow-up
     for (const fu of created) {
       createNotificationForEvent('followUpAssigned', {
         title: fu.title,
