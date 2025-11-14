@@ -1,130 +1,152 @@
 'use client';
 
-import {
-  getPrograms as dbGetPrograms,
-  upsertProgram as dbUpsertProgram,
-  deleteProgram as dbDeleteProgram,
-  getSystemConfig,
-} from './database';
+import { nanoid } from 'nanoid';
+import { getSystemConfig } from './config';
+import { generateTalliesForProgram } from './tally';
 
-import type { Program, ProgramStatus, ProgramType } from '@/types';
+import type { Program, SystemConfig } from '@/types';
 
-function nowIso(): string {
-  return new Date().toISOString();
+const STORAGE_KEY = 'church-crm:programs';
+
+let inMemoryPrograms: Program[] = [];
+
+/* -------------------------------------------------------------------------- */
+/*  Storage helpers                                                           */
+/* -------------------------------------------------------------------------- */
+
+function loadPrograms(): Program[] {
+  if (typeof window === 'undefined') {
+    return inMemoryPrograms;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      inMemoryPrograms = [];
+      return inMemoryPrograms;
+    }
+    const parsed = JSON.parse(raw) as Program[];
+    if (!Array.isArray(parsed)) {
+      inMemoryPrograms = [];
+      return inMemoryPrograms;
+    }
+    inMemoryPrograms = parsed;
+    return inMemoryPrograms;
+  } catch {
+    inMemoryPrograms = [];
+    return inMemoryPrograms;
+  }
 }
 
-function generateId(prefix: string): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return `${prefix}_${crypto.randomUUID()}`;
+function savePrograms(list: Program[]): void {
+  inMemoryPrograms = list;
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // best-effort
   }
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public API                                                                */
+/* -------------------------------------------------------------------------- */
+
+export function getAllPrograms(): Program[] {
+  return loadPrograms().sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export function getProgramById(id: string): Program | undefined {
+  return loadPrograms().find((p) => p.id === id);
 }
 
 export interface CreateProgramInput {
   name: string;
-  type: ProgramType;
-  date: string;                   // ISO date
-  startTime: string;              // "HH:mm"
-  endTime?: string;
+  type: string;
+  date: string; // ISO date
+  startTime?: string; // optional HH:mm
   location?: string;
-  description?: string;
-  status?: ProgramStatus;
   expectedAttendance?: number;
+  description?: string;
+}
+
+/**
+ * Create a program and optionally auto-generate tallies for it.
+ */
+export function createProgram(input: CreateProgramInput): Program {
+  const now = new Date().toISOString();
+  const cfg: SystemConfig = getSystemConfig();
+  const tallyCfg = cfg.tally;
+
+  const list = loadPrograms();
+
+  const program: Program = {
+    id: nanoid(),
+    name: input.name,
+    type: input.type,
+    date: input.date,
+    startTime: input.startTime,
+    location: input.location,
+    expectedAttendance: input.expectedAttendance,
+    description: input.description,
+    createdAt: now,
+    updatedAt: now,
+  } as Program;
+
+  list.push(program);
+  savePrograms(list);
+
+  if (tallyCfg.enabled && tallyCfg.autoGenerateOnProgramCreate) {
+    const expected =
+      input.expectedAttendance && input.expectedAttendance > 0
+        ? input.expectedAttendance
+        : tallyCfg.defaultExpectedAttendance;
+
+    if (expected > 0) {
+      generateTalliesForProgram({
+        programId: program.id,
+        expectedCount: expected,
+      });
+    }
+  }
+
+  return program;
 }
 
 export interface UpdateProgramInput {
   id: string;
   name?: string;
-  type?: ProgramType;
+  type?: string;
   date?: string;
   startTime?: string;
-  endTime?: string;
   location?: string;
-  description?: string;
-  status?: ProgramStatus;
   expectedAttendance?: number;
+  description?: string;
 }
 
-// ---- Queries ----------------------------------------------------------------
+/**
+ * Update a program (no tally regeneration here, to avoid accidental duplication).
+ */
+export function updateProgram(input: UpdateProgramInput): Program {
+  const list = loadPrograms();
+  const idx = list.findIndex((p) => p.id === input.id);
+  if (idx === -1) {
+    throw new Error('Program not found.');
+  }
 
-export function getAllPrograms(): Program[] {
-  return dbGetPrograms();
-}
-
-export function getProgramById(programId: string): Program | undefined {
-  return dbGetPrograms().find((p) => p.id === programId);
-}
-
-export function getUpcomingPrograms(): Program[] {
-  const now = new Date();
-  return dbGetPrograms().filter((p) => {
-    const d = new Date(p.date);
-    return !Number.isNaN(d.getTime()) && d >= now;
-  });
-}
-
-export function getPastPrograms(): Program[] {
-  const now = new Date();
-  return dbGetPrograms().filter((p) => {
-    const d = new Date(p.date);
-    return !Number.isNaN(d.getTime()) && d < now;
-  });
-}
-
-// ---- Create / Update / Delete ----------------------------------------------
-
-export function createProgram(input: CreateProgramInput): Program {
-  const now = nowIso();
-  const config = getSystemConfig();
-
-  const program: Program = {
-    id: generateId('program'),
-    name: input.name,
-    type: input.type,
-    date: input.date,
-    startTime: input.startTime,
-    endTime: input.endTime,
-    location: input.location,
-    description: input.description,
-    status: input.status ?? 'planned',
-    expectedAttendance:
-      input.expectedAttendance ?? config.tally.defaultExpectedAttendance,
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  dbUpsertProgram(program);
-
-  // NOTE: Tally auto-generation will be handled in lib/tally.ts
-  // using config.tally.autoGenerateOnProgramCreate.
-  // We do NOT call it here yet to avoid circular dependencies.
-
-  return program;
-}
-
-export function updateProgram(input: UpdateProgramInput): Program | null {
-  const existing = getProgramById(input.id);
-  if (!existing) return null;
+  const now = new Date().toISOString();
+  const existing = list[idx];
 
   const updated: Program = {
     ...existing,
-    name: input.name ?? existing.name,
-    type: input.type ?? existing.type,
-    date: input.date ?? existing.date,
-    startTime: input.startTime ?? existing.startTime,
-    endTime: input.endTime ?? existing.endTime,
-    location: input.location ?? existing.location,
-    description: input.description ?? existing.description,
-    status: input.status ?? existing.status,
-    expectedAttendance:
-      input.expectedAttendance ?? existing.expectedAttendance,
-    updatedAt: nowIso(),
-  };
+    ...input,
+    id: existing.id,
+    updatedAt: now,
+  } as Program;
 
-  dbUpsertProgram(updated);
+  list[idx] = updated;
+  savePrograms(list);
+
   return updated;
-}
-
-export function deleteProgram(programId: string): void {
-  dbDeleteProgram(programId);
 }
