@@ -1,259 +1,299 @@
 'use client';
 
-import { useEffect, useState, FormEvent } from 'react';
-import { getSystemConfig, updateBirthdaysConfig } from '@/lib/config';
-import type { SystemConfig } from '@/types';
+import { FormEvent, useEffect, useState } from 'react';
+import { getSystemConfig, updateSystemConfig } from '@/lib/config';
 
-type DefaultChannel = SystemConfig['birthdays']['defaultChannel'];
+import type { SystemConfig, BirthdayMessagingConfig } from '@/types';
 
-export default function BirthdaySettingsPage() {
-  const [loading, setLoading] = useState(true);
+export default function BirthdaysSettingsPage() {
+  const [config, setConfig] = useState<SystemConfig | null>(null);
+  const [birthdays, setBirthdays] = useState<BirthdayMessagingConfig | null>(
+    null,
+  );
+
   const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
+
+  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  const [runMessage, setRunMessage] = useState<string | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
 
-  const [enabled, setEnabled] = useState<boolean>(true);
-  const [leadTimeDays, setLeadTimeDays] = useState<number>(0);
-  const [defaultChannel, setDefaultChannel] = useState<DefaultChannel>('whatsapp');
-  const [sendAutomatically, setSendAutomatically] = useState<boolean>(true);
-  const [followUpType, setFollowUpType] = useState<string>('birthday');
-  const [messageTemplateId, setMessageTemplateId] = useState<string>('');
-
-  // Load current config on mount
   useEffect(() => {
-    try {
-      const cfg = getSystemConfig();
-      const b = cfg.birthdays;
-
-      setEnabled(b.enabled);
-      setLeadTimeDays(b.leadTimeDays ?? 0);
-      setDefaultChannel((b.defaultChannel ?? 'whatsapp') as DefaultChannel);
-      setSendAutomatically(b.sendAutomatically ?? true);
-      setFollowUpType(b.followUpType || 'birthday');
-      setMessageTemplateId(b.messageTemplateId || '');
-    } catch (err: unknown) {
-      const e = err as Error;
-      setError(e.message ?? 'Failed to load birthday settings.');
-    } finally {
-      setLoading(false);
-    }
+    const cfg = getSystemConfig();
+    setConfig(cfg);
+    setBirthdays(cfg.birthdays);
   }, []);
 
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
+  function handleChange<K extends keyof BirthdayMessagingConfig>(
+    field: K,
+    value: BirthdayMessagingConfig[K],
+  ) {
+    if (!birthdays) return;
+    setBirthdays({
+      ...birthdays,
+      [field]: value,
+    });
+    setMessage(null);
     setError(null);
-    setSuccess(null);
+  }
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!birthdays) return;
+
     setSaving(true);
+    setMessage(null);
+    setError(null);
 
     try {
-      const updated = updateBirthdaysConfig({
-        enabled,
-        leadTimeDays: Number.isNaN(leadTimeDays) ? 0 : leadTimeDays,
-        defaultChannel,
-        sendAutomatically,
-        followUpType: followUpType.trim() || 'birthday',
-        messageTemplateId: messageTemplateId.trim(),
+      const updated = updateSystemConfig({
+        birthdays,
       });
-
-      const b = updated.birthdays;
-      setEnabled(b.enabled);
-      setLeadTimeDays(b.leadTimeDays ?? 0);
-      setDefaultChannel((b.defaultChannel ?? 'whatsapp') as DefaultChannel);
-      setSendAutomatically(b.sendAutomatically ?? true);
-      setFollowUpType(b.followUpType || 'birthday');
-      setMessageTemplateId(b.messageTemplateId || '');
-
-      setSuccess('Birthday settings updated successfully.');
+      setConfig(updated);
+      setBirthdays(updated.birthdays);
+      setMessage('Birthday settings saved successfully.');
     } catch (err: unknown) {
       const e = err as Error;
-      setError(e.message ?? 'Failed to update birthday settings.');
+      setError(e.message ?? 'Failed to save birthday settings.');
     } finally {
       setSaving(false);
     }
-  };
+  }
+
+  async function handleRunNow() {
+    setRunning(true);
+    setRunMessage(null);
+    setRunError(null);
+
+    try {
+      const res = await fetch('/api/cron/birthdays', {
+        method: 'POST',
+      });
+
+      const body = await res.json();
+
+      if (!res.ok || !body.ok) {
+        throw new Error(body.error ?? 'Failed to run birthday automation.');
+      }
+
+      const { result } = body as {
+        result: {
+          configEnabled: boolean;
+          consideredCount: number;
+          scheduledCount: number;
+          sentCount: number;
+          followUpsCreated: number;
+        };
+      };
+
+      setRunMessage(
+        `Considered ${result.consideredCount} people, scheduled ${result.scheduledCount} birthdays, sent ${result.sentCount} message(s), created ${result.followUpsCreated} follow-up(s).`,
+      );
+    } catch (err: unknown) {
+      const e = err as Error;
+      setRunError(e.message ?? 'Failed to run birthday automation.');
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  if (!birthdays) {
+    return (
+      <div className="p-6">
+        <p className="text-sm text-slate-500">Loading birthday settings…</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="p-6 max-w-3xl mx-auto">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
-          Birthday Messaging Settings
-        </h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Configure how the system handles birthday greetings and reminders.
-        </p>
-      </header>
+    <div className="p-6 space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+            Birthday Messaging
+          </h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Configure how birthday greetings are generated and sent. You can also
+            run a manual check for upcoming birthdays.
+          </p>
+        </div>
 
-      {loading ? (
-        <div className="text-sm text-slate-500">Loading settings…</div>
-      ) : (
-        <form
-          onSubmit={handleSubmit}
-          className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-5 space-y-5"
-        >
+        <div className="flex flex-col items-end space-y-2">
+          <button
+            type="button"
+            onClick={handleRunNow}
+            disabled={running}
+            className="inline-flex items-center rounded-md border border-orange-500 bg-white px-3 py-1.5 text-xs font-medium text-orange-600 shadow-sm hover:bg-orange-50 disabled:opacity-60 dark:bg-slate-900 dark:hover:bg-orange-950/20"
+          >
+            {running ? 'Running birthday check…' : 'Run birthday check now'}
+          </button>
+          {runMessage && (
+            <p className="max-w-sm text-[11px] text-emerald-600 dark:text-emerald-400">
+              {runMessage}
+            </p>
+          )}
+          {runError && (
+            <p className="max-w-sm text-[11px] text-red-600 dark:text-red-400">
+              {runError}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {(message || error) && (
+        <div className="space-y-2">
+          {message && (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-100">
+              {message}
+            </div>
+          )}
           {error && (
-            <div className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-md px-3 py-2">
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-100">
               {error}
             </div>
           )}
-          {success && (
-            <div className="text-xs text-emerald-700 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-900 rounded-md px-3 py-2">
-              {success}
-            </div>
-          )}
-
-          {/* Enabled toggle */}
-          <section className="space-y-2">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                  Birthday automation
-                </h2>
-                <p className="text-xs text-slate-500">
-                  When enabled, the system will automatically detect upcoming birthdays and
-                  either send greetings or create follow-ups based on your configuration.
-                </p>
-              </div>
-              <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
-                <input
-                  type="checkbox"
-                  checked={enabled}
-                  onChange={(e) => setEnabled(e.target.checked)}
-                  className="rounded border-slate-300 dark:border-slate-700"
-                />
-                <span>Enabled</span>
-              </label>
-            </div>
-          </section>
-
-          {/* Lead time and default channel */}
-          <section className="grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200">
-                Lead time (days)
-              </label>
-              <input
-                type="number"
-                value={leadTimeDays}
-                onChange={(e) => setLeadTimeDays(parseInt(e.target.value, 10) || 0)}
-                className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
-                min={0}
-              />
-              <p className="mt-1 text-[11px] text-slate-500">
-                0 = send on the birthday; 1 = day before; 2 = two days before, etc.
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200">
-                Default channel
-              </label>
-              <select
-                value={defaultChannel}
-                onChange={(e) =>
-                  setDefaultChannel(e.target.value as DefaultChannel)
-                }
-                className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
-              >
-                <option value="whatsapp">WhatsApp</option>
-                <option value="sms">SMS</option>
-                <option value="email">Email</option>
-              </select>
-              <p className="mt-1 text-[11px] text-slate-500">
-                The system will attempt to use this channel first for birthday greetings.
-              </p>
-            </div>
-          </section>
-
-          {/* Behaviour: auto-send vs follow-up */}
-          <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-              Behaviour
-            </h2>
-            <p className="text-xs text-slate-500 mb-2">
-              Choose whether birthdays are handled automatically or as follow-up tasks.
-            </p>
-
-            <div className="flex flex-col gap-2 text-xs text-slate-700 dark:text-slate-200">
-              <label className="inline-flex items-start gap-2">
-                <input
-                  type="radio"
-                  name="birthday-behaviour"
-                  checked={sendAutomatically}
-                  onChange={() => setSendAutomatically(true)}
-                  className="mt-[3px]"
-                />
-                <span>
-                  <span className="font-medium">Auto-send greetings</span>
-                  <br />
-                  <span className="text-slate-500">
-                    The system sends the message on your behalf using the selected channel.
-                  </span>
-                </span>
-              </label>
-
-              <label className="inline-flex items-start gap-2">
-                <input
-                  type="radio"
-                  name="birthday-behaviour"
-                  checked={!sendAutomatically}
-                  onChange={() => setSendAutomatically(false)}
-                  className="mt-[3px]"
-                />
-                <span>
-                  <span className="font-medium">Create follow-up only</span>
-                  <br />
-                  <span className="text-slate-500">
-                    A follow-up task is created so an RM or pastor can call/message personally.
-                  </span>
-                </span>
-              </label>
-            </div>
-          </section>
-
-          {/* Follow-up & template */}
-          <section className="grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200">
-                Follow-up type
-              </label>
-              <input
-                value={followUpType}
-                onChange={(e) => setFollowUpType(e.target.value)}
-                className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
-                placeholder="e.g. birthday"
-              />
-              <p className="mt-1 text-[11px] text-slate-500">
-                Used when creating follow-up records (e.g. &quot;birthday&quot;).
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200">
-                Message template ID
-              </label>
-              <input
-                value={messageTemplateId}
-                onChange={(e) => setMessageTemplateId(e.target.value)}
-                className="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500"
-                placeholder="e.g. birthday-default"
-              />
-              <p className="mt-1 text-[11px] text-slate-500">
-                References a template in your communications provider or internal template list.
-              </p>
-            </div>
-          </section>
-
-          <div className="flex justify-end pt-3">
-            <button
-              type="submit"
-              disabled={saving}
-              className="inline-flex items-center rounded-md bg-orange-500 px-4 py-2 text-sm font-medium text-white shadow hover:bg-orange-600 disabled:opacity-50"
-            >
-              {saving ? 'Saving…' : 'Save changes'}
-            </button>
-          </div>
-        </form>
+        </div>
       )}
+
+      <form
+        onSubmit={handleSubmit}
+        className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900"
+      >
+        <div className="grid gap-4 md:grid-cols-3">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+              Enabled
+            </label>
+            <div className="mt-2 flex items-center gap-2">
+              <input
+                id="birthdays-enabled"
+                type="checkbox"
+                checked={birthdays.enabled}
+                onChange={(e) =>
+                  handleChange('enabled', e.target.checked as any)
+                }
+                className="h-4 w-4 rounded border-slate-300 text-orange-500 focus:ring-orange-500"
+              />
+              <label
+                htmlFor="birthdays-enabled"
+                className="text-xs text-slate-600 dark:text-slate-300"
+              >
+                Automatically prepare birthday greetings
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+              Lead time (days)
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={7}
+              value={birthdays.leadTimeDays}
+              onChange={(e) =>
+                handleChange('leadTimeDays', Number(e.target.value) || 0)
+              }
+              className="mt-1 w-full rounded-md border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-700"
+            />
+            <p className="mt-1 text-[11px] text-slate-500">
+              0 = send on the birthday, 1 = day before, etc.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+              Default channel
+            </label>
+            <select
+              value={birthdays.defaultChannel}
+              onChange={(e) =>
+                handleChange(
+                  'defaultChannel',
+                  e.target.value as BirthdayMessagingConfig['defaultChannel'],
+                )
+              }
+              className="mt-1 w-full rounded-md border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-700"
+            >
+              <option value="whatsapp">WhatsApp</option>
+              <option value="sms">SMS</option>
+              <option value="email">Email</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+              Send automatically
+            </label>
+            <div className="mt-2 flex items-center gap-2">
+              <input
+                id="birthdays-send-auto"
+                type="checkbox"
+                checked={birthdays.sendAutomatically}
+                onChange={(e) =>
+                  handleChange('sendAutomatically', e.target.checked as any)
+                }
+                className="h-4 w-4 rounded border-slate-300 text-orange-500 focus:ring-orange-500"
+              />
+              <label
+                htmlFor="birthdays-send-auto"
+                className="text-xs text-slate-600 dark:text-slate-300"
+              >
+                If disabled, the system will create follow-ups instead of sending
+                messages directly.
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+              Follow-up type (if not auto-send)
+            </label>
+            <input
+              type="text"
+              value={birthdays.followUpType}
+              onChange={(e) =>
+                handleChange('followUpType', e.target.value || 'birthday')
+              }
+              className="mt-1 w-full rounded-md border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-700"
+              placeholder="birthday"
+            />
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+            Template (from Communications templates)
+          </label>
+          <input
+            type="text"
+            value={birthdays.messageTemplateId}
+            onChange={(e) =>
+              handleChange('messageTemplateId', e.target.value || '')
+            }
+            className="mt-1 w-full rounded-md border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-700"
+            placeholder="Template ID from Settings → Communications"
+          />
+          <p className="mt-1 text-[11px] text-slate-500">
+            The body content is defined under Settings → Communications → Broadcast
+            templates. This ID links the birthday messages to one of those templates.
+          </p>
+        </div>
+
+        <div className="mt-4 flex justify-end">
+          <button
+            type="submit"
+            disabled={saving}
+            className="inline-flex items-center rounded-md bg-orange-500 px-4 py-2 text-sm font-medium text-white shadow hover:bg-orange-600 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save settings'}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
