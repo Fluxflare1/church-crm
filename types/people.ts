@@ -116,3 +116,34 @@ export interface Person {
 
 // Inside Person engagement/evolution-ish block, add this optional:
 lastBirthdayMessageYear?: number;
+
+
+// types/people.ts (sketch – keep your existing fields, just add lastBirthdayMessageYear)
+
+export interface PersonEvolution {
+  guestType?: 'first-time' | 'returning' | 'regular';
+  memberRating?: 'regular' | 'adherent' | 'returning' | 'visiting';
+  // ...other evolution/attendance fields
+  lastVisitAt?: string;
+  // NEW: birthday messaging tracking to avoid duplicates
+  lastBirthdayMessageYear?: number;
+}
+
+export interface Person {
+  id: string;
+  category: 'guest' | 'member';
+  personalData: {
+    firstName: string;
+    lastName: string;
+    phone?: string;
+    email?: string;
+    dob?: string; // ISO date e.g. "1990-05-12"
+    // ...
+  };
+  evolution?: PersonEvolution;
+  engagement?: {
+    isWorker?: boolean;
+    // ...
+  };
+  // ...rest of your Person fields
+}
