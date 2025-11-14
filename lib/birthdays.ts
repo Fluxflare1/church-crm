@@ -1,9 +1,10 @@
 'use client';
 
 import { getAllPeople, savePerson } from './people';
-import { getSystemConfig, updateSystemConfig } from './config';
+import { getSystemConfig } from './config';
 import { sendMessageToPerson } from './communications';
 import { createFollowUp } from './follow-ups';
+import { createNotificationForEvent } from './notifications';
 
 import type {
   Person,
@@ -81,19 +82,17 @@ export async function runBirthdayAutomation(options?: {
       dobDate.getDate(),
     );
 
-    // target date when we should act
     const targetTime = birthdayThisYear.getTime() - leadMillis;
 
-    // ignore birthdays already passed (with lead time)
     if (targetTime > today) continue;
 
-    // we don't want to run for dates long in the past either:
+    // don't process very old (beyond 2 days after target)
     const maxLagMillis = 2 * 24 * 60 * 60 * 1000;
     if (today - targetTime > maxLagMillis) {
       continue;
     }
 
-    // Prevent duplicate sends in same year
+    // avoid duplicate for same year
     const lastYear = person.evolution?.lastBirthdayMessageYear;
     if (lastYear === now.getFullYear()) {
       continue;
@@ -111,12 +110,15 @@ export async function runBirthdayAutomation(options?: {
       continue;
     }
 
-    // Determine channel
     const channel: CommunicationChannel = birthdaysCfg.defaultChannel;
 
     let sent = false;
     let fuCreated = false;
     let error: string | undefined;
+
+    const fullName = `${person.personalData.firstName ?? ''} ${
+      person.personalData.lastName ?? ''
+    }`.trim();
 
     try {
       if (birthdaysCfg.sendAutomatically) {
@@ -136,18 +138,27 @@ export async function runBirthdayAutomation(options?: {
         if (res.success) {
           sent = true;
           sentCount += 1;
+
+          // 🔔 Notification: birthday message sent
+          createNotificationForEvent('upcomingBirthday', {
+            title: `Birthday message sent: ${fullName}`,
+            message: `A birthday greeting was sent to ${fullName} via ${channel.toUpperCase()}.`,
+            personId: person.id,
+            severity: 'info',
+            meta: {
+              channel,
+            },
+          });
         } else {
           error = res.errorMessage ?? 'Failed to send birthday message.';
         }
       } else {
-        // create a follow-up instead of direct send
-        const title = `Birthday follow-up: ${person.personalData.firstName ?? ''} ${
-          person.personalData.lastName ?? ''
-        }`.trim();
+        // create follow-up task instead
+        const title = `Birthday follow-up: ${fullName}`.trim();
         const description =
           'Send a personalised birthday greeting and prayer to this person.';
 
-        createFollowUp({
+        const fu = createFollowUp({
           personId: person.id,
           type: birthdaysCfg.followUpType as any,
           title,
@@ -161,6 +172,19 @@ export async function runBirthdayAutomation(options?: {
 
         fuCreated = true;
         followUpsCreated += 1;
+
+        // 🔔 Notification: birthday follow-up created
+        createNotificationForEvent('upcomingBirthday', {
+          title: `Birthday follow-up created: ${fullName}`,
+          message:
+            'A birthday follow-up has been created. Please reach out to them with a greeting.',
+          personId: person.id,
+          followUpId: fu.id,
+          severity: 'info',
+          meta: {
+            channelPreference: channel,
+          },
+        });
       }
 
       // Persist lastBirthdayMessageYear
@@ -204,14 +228,10 @@ async function buildBirthdayMessage(
   person: Person,
   cfg: SystemConfig,
 ): Promise<string> {
-  // Use template referenced in cfg.birthdays.messageTemplateId (from broadcastTemplates)
-  const tmplId = cfg.birthdays.messageTemplateId;
-  const template =
-    cfg.communications.broadcastTemplates?.find((t) => t.id === tmplId) ?? null;
-
-  const bodyTemplate =
-    template?.bodyTemplate ||
-    `Happy Birthday {{firstName}}! We celebrate you today at {{churchName}} and pray that this new year will be full of God’s grace.`;
+  // At this stage, we use a built-in template.
+  // messageTemplateId can be used later to link to richer templates.
+  const defaultTemplate =
+    'Happy Birthday {{firstName}}! We celebrate you today at {{churchName}} and pray that this new year will be full of God’s grace.';
 
   const fullName = `${person.personalData.firstName ?? ''} ${
     person.personalData.lastName ?? ''
@@ -224,7 +244,7 @@ async function buildBirthdayMessage(
     '{{churchName}}': cfg.systemInfo.churchName ?? 'church',
   };
 
-  let result = bodyTemplate;
+  let result = defaultTemplate;
   for (const [token, value] of Object.entries(replacements)) {
     result = result.split(token).join(value);
   }
