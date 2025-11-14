@@ -1,303 +1,387 @@
 'use client';
 
-import {
-  getTallies as dbGetTallies,
-  saveTallies as dbSaveTallies,
-  upsertTally as dbUpsertTally,
-  getPrograms,
-  getSystemConfig,
-} from './database';
+import { nanoid } from 'nanoid';
+import { getSystemConfig } from './config';
+import { markAttendance } from './attendance';
 
-import type { Tally, TallyStatus, TallyGenerationResult, TallyReport, TallyArrivalBucket, Program } from '@/types';
+import type {
+  Tally,
+  TallyStatus,
+  TallyCheckInSource,
+  Program,
+  SystemConfig,
+  AttendanceRecord,
+} from '@/types';
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
+const STORAGE_KEY = 'church-crm:tallies';
 
-function generateId(prefix: string): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return `${prefix}_${crypto.randomUUID()}`;
+let inMemoryTallies: Tally[] = [];
+
+/* -------------------------------------------------------------------------- */
+/*  Storage helpers                                                           */
+/* -------------------------------------------------------------------------- */
+
+function loadTallies(): Tally[] {
+  if (typeof window === 'undefined') {
+    return inMemoryTallies;
   }
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      inMemoryTallies = [];
+      return inMemoryTallies;
+    }
+    const parsed = JSON.parse(raw) as Tally[];
+    if (!Array.isArray(parsed)) {
+      inMemoryTallies = [];
+      return inMemoryTallies;
+    }
+    inMemoryTallies = parsed;
+    return inMemoryTallies;
+  } catch {
+    inMemoryTallies = [];
+    return inMemoryTallies;
+  }
 }
 
-function padNumber(num: number, padding: number): string {
-  const s = String(num);
-  if (s.length >= padding) return s;
-  return '0'.repeat(padding - s.length) + s;
+function saveTallies(list: Tally[]): void {
+  inMemoryTallies = list;
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // best-effort
+  }
 }
 
-function getProgram(programId: string): Program | undefined {
-  return getPrograms().find((p) => p.id === programId);
+/* -------------------------------------------------------------------------- */
+/*  Public getters                                                            */
+/* -------------------------------------------------------------------------- */
+
+export function getAllTallies(): Tally[] {
+  return loadTallies();
 }
 
 export function getTalliesForProgram(programId: string): Tally[] {
-  return dbGetTallies().filter((t) => t.programId === programId);
+  return loadTallies()
+    .filter((t) => t.programId === programId)
+    .sort((a, b) => a.code.localeCompare(b.code));
+}
+
+export function getTallyByProgramAndCode(
+  programId: string,
+  code: string,
+): Tally | undefined {
+  return loadTallies().find(
+    (t) => t.programId === programId && t.code.toUpperCase() === code.toUpperCase(),
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Generation                                                                */
+/* -------------------------------------------------------------------------- */
+
+export interface GenerateTalliesInput {
+  programId: string;
+  /**
+   * How many tallies to have in total for this program.
+   * If tallies already exist, only the missing count will be created.
+   */
+  expectedCount: number;
 }
 
 /**
- * Generate a batch of tallies for a specific program.
- * Unlimited count (bounded only by practical storage limits).
+ * Ensure that a program has at least expectedCount tallies.
+ * Uses SystemConfig.tally for prefix and padding.
  */
-export function generateTalliesForProgram(options: {
-  programId: string;
-  count?: number;
-}): { tallies: Tally[]; summary: TallyGenerationResult } {
-  const program = getProgram(options.programId);
-  if (!program) {
-    throw new Error('Program not found.');
+export function generateTalliesForProgram(
+  input: GenerateTalliesInput,
+): Tally[] {
+  const cfg: SystemConfig = getSystemConfig();
+  const tallyCfg = cfg.tally;
+
+  if (!tallyCfg.enabled) {
+    return [];
   }
 
-  const config = getSystemConfig();
-  const existing = getTalliesForProgram(options.programId);
-  const startingIndex = existing.length + 1;
+  const prefix = tallyCfg.codePrefix || 'T';
+  const padding = tallyCfg.codePadding ?? 3;
 
-  const count = options.count ?? program.expectedAttendance ?? config.tally.defaultExpectedAttendance;
-  if (count <= 0) {
-    throw new Error('Tally count must be greater than zero.');
+  const list = loadTallies();
+  const existing = list.filter((t) => t.programId === input.programId);
+  const existingCount = existing.length;
+
+  if (existingCount >= input.expectedCount) {
+    return existing.sort((a, b) => a.code.localeCompare(b.code));
   }
 
-  const tallies: Tally[] = [];
-  const allTallies = dbGetTallies();
-  const now = nowIso();
+  const now = new Date().toISOString();
+  const newTallies: Tally[] = [];
+  const startIndex = existingCount + 1;
 
-  for (let i = 0; i < count; i++) {
-    const serial = startingIndex + i;
-    const code = `${config.tally.codePrefix}${padNumber(serial, config.tally.codePadding)}`;
+  for (let i = startIndex; i <= input.expectedCount; i++) {
+    const seq = i.toString().padStart(padding, '0');
+    const code = `${prefix}${seq}`;
 
     const tally: Tally = {
-      id: generateId('tally'),
+      id: nanoid(),
+      programId: input.programId,
       code,
-      programId: options.programId,
       status: 'available',
-      issuedToPersonId: undefined,
-      issuedAt: undefined,
-      issuedByUserId: undefined,
-      loggedAt: undefined,
-      loggedByUserId: undefined,
       createdAt: now,
       updatedAt: now,
     };
 
-    tallies.push(tally);
-    allTallies.push(tally);
+    list.push(tally);
+    newTallies.push(tally);
   }
 
-  dbSaveTallies(allTallies);
+  saveTallies(list);
 
-  const summary: TallyGenerationResult = {
-    programId: options.programId,
-    fromCode: tallies[0].code,
-    toCode: tallies[tallies.length - 1].code,
-    count: tallies.length,
-  };
-
-  return { tallies, summary };
+  return existing.concat(newTallies).sort((a, b) => a.code.localeCompare(b.code));
 }
 
-function findAvailableTally(programId: string): Tally | undefined {
-  return dbGetTallies().find(
-    (t) => t.programId === programId && t.status === 'available'
-  );
-}
+/* -------------------------------------------------------------------------- */
+/*  Issuance (gate)                                                           */
+/* -------------------------------------------------------------------------- */
 
-function findTallyByCode(programId: string, code: string): Tally | undefined {
-  return dbGetTallies().find(
-    (t) => t.programId === programId && t.code === code
-  );
-}
-
-export interface IssueTallyOptions {
+export interface IssueTallyInput {
   programId: string;
-  personId: string;
+  /**
+   * Optional specific code. If omitted, the next available tally is used.
+   */
+  code?: string;
   issuedByUserId: string;
-  issuedAtIso?: string;
-  code?: string; // if specified, use that code; otherwise first available
+  /**
+   * Optional person if the RM already knows the profile at the gate.
+   * If present, we immediately map the tally to that person and mark attendance.
+   */
+  personId?: string;
+  /**
+   * Source of check-in when personId is provided at issuance time.
+   */
+  checkInSource?: TallyCheckInSource;
 }
 
 /**
- * Issue a tally (check-in) to a person.
- * Tracks arrival time in issuedAt.
+ * Issue a tally at the gate. This is the TRUE arrival event.
+ * - Sets issuedAt
+ * - Sets status = 'issued'
+ * - If personId is provided, also maps the tally and marks attendance.
  */
-export function issueTallyToPerson(options: IssueTallyOptions): Tally {
-  const now = nowIso();
-  const allTallies = dbGetTallies();
+export function issueTally(input: IssueTallyInput): Tally {
+  const cfg = getSystemConfig();
+  const tallyCfg = cfg.tally;
+
+  if (!tallyCfg.enabled) {
+    throw new Error('Tally system is disabled in SystemConfig.');
+  }
+
+  const now = new Date().toISOString();
+  const list = loadTallies();
 
   let tally: Tally | undefined;
-  if (options.code) {
-    tally = findTallyByCode(options.programId, options.code);
+
+  if (input.code) {
+    tally = list.find(
+      (t) =>
+        t.programId === input.programId &&
+        t.code.toUpperCase() === input.code!.toUpperCase(),
+    );
+    if (!tally) {
+      throw new Error(`No tally with code ${input.code} for this program.`);
+    }
+    if (tally.status !== 'available') {
+      throw new Error(`Tally ${input.code} is not available for issuance.`);
+    }
   } else {
-    tally = findAvailableTally(options.programId);
-  }
+    tally = list
+      .filter((t) => t.programId === input.programId && t.status === 'available')
+      .sort((a, b) => a.code.localeCompare(b.code))[0];
 
-  if (!tally) {
-    throw new Error('No available tally for this program.');
-  }
-
-  const idx = allTallies.findIndex((t) => t.id === tally!.id);
-  if (idx === -1) {
-    throw new Error('Tally not found in storage.');
-  }
-
-  const updated: Tally = {
-    ...tally,
-    status: 'issued',
-    issuedToPersonId: options.personId,
-    issuedAt: options.issuedAtIso ?? now,
-    issuedByUserId: options.issuedByUserId,
-    updatedAt: now,
-  };
-
-  allTallies[idx] = updated;
-  dbSaveTallies(allTallies);
-
-  return updated;
-}
-
-export interface LogTallyOptions {
-  programId: string;
-  code: string;
-  loggedByUserId: string;
-  loggedAtIso?: string;
-}
-
-/**
- * Log a tally (e.g. when validated or collected).
- */
-export function logTally(options: LogTallyOptions): Tally {
-  const now = nowIso();
-  const allTallies = dbGetTallies();
-  const tallyIndex = allTallies.findIndex(
-    (t) => t.programId === options.programId && t.code === options.code
-  );
-
-  if (tallyIndex === -1) {
-    throw new Error('Tally not found.');
-  }
-
-  const tally = allTallies[tallyIndex];
-
-  const updatedStatus: TallyStatus =
-    tally.status === 'available' ? 'logged' : 'logged';
-
-  const updated: Tally = {
-    ...tally,
-    status: updatedStatus,
-    loggedAt: options.loggedAtIso ?? now,
-    loggedByUserId: options.loggedByUserId,
-    updatedAt: now,
-  };
-
-  allTallies[tallyIndex] = updated;
-  dbSaveTallies(allTallies);
-
-  return updated;
-}
-
-/**
- * Mark a tally as void.
- */
-export function voidTally(tallyId: string): Tally {
-  const allTallies = dbGetTallies();
-  const idx = allTallies.findIndex((t) => t.id === tallyId);
-  if (idx === -1) {
-    throw new Error('Tally not found.');
-  }
-
-  const now = nowIso();
-  const tally = allTallies[idx];
-
-  const updated: Tally = {
-    ...tally,
-    status: 'void',
-    updatedAt: now,
-  };
-
-  allTallies[idx] = updated;
-  dbSaveTallies(allTallies);
-
-  return updated;
-}
-
-// ---- Reports ----------------------------------------------------------------
-
-function parseProgramDateTime(program: Program, timeIso: string): { programTime: Date; checkIn: Date } | null {
-  const programDate = new Date(program.date);
-  if (Number.isNaN(programDate.getTime())) return null;
-
-  const [hh, mm] = program.startTime.split(':');
-  if (hh === undefined || mm === undefined) return null;
-
-  programDate.setHours(Number(hh), Number(mm), 0, 0);
-
-  const checkIn = new Date(timeIso);
-  if (Number.isNaN(checkIn.getTime())) return null;
-
-  return { programTime: programDate, checkIn };
-}
-
-function computeMinutesDifference(program: Program, tally: Tally): number | null {
-  if (!tally.issuedAt) return null;
-
-  const parsed = parseProgramDateTime(program, tally.issuedAt);
-  if (!parsed) return null;
-
-  const diffMs = parsed.checkIn.getTime() - parsed.programTime.getTime();
-  return diffMs / (1000 * 60); // minutes
-}
-
-function bucketizeArrival(program: Program, tallies: Tally[]): TallyArrivalBucket[] {
-  const buckets: Record<string, number> = {
-    'On Time': 0,
-    '0–10 min late': 0,
-    '11–20 min late': 0,
-    '>20 min late': 0,
-  };
-
-  for (const t of tallies) {
-    const minutes = computeMinutesDifference(program, t);
-    if (minutes === null) continue;
-
-    if (minutes <= 0) {
-      buckets['On Time'] += 1;
-    } else if (minutes > 0 && minutes <= 10) {
-      buckets['0–10 min late'] += 1;
-    } else if (minutes > 10 && minutes <= 20) {
-      buckets['11–20 min late'] += 1;
-    } else {
-      buckets['>20 min late'] += 1;
+    if (!tally) {
+      throw new Error('No available tallies left to issue for this program.');
     }
   }
 
-  return Object.entries(buckets).map<TallyArrivalBucket>(([label, count]) => ({
-    label,
-    count,
-  }));
+  const idx = list.findIndex((t) => t.id === tally!.id);
+
+  const updated: Tally = {
+    ...tally!,
+    status: 'issued',
+    issuedAt: now,
+    issuedByUserId: input.issuedByUserId,
+    updatedAt: now,
+  };
+
+  // If we already know the person at the gate, map immediately
+  if (input.personId) {
+    updated.personId = input.personId;
+    updated.mappedAt = now;
+    updated.checkInSource = input.checkInSource ?? 'rm';
+
+    // Create attendance with the TRUE arrival time (issuedAt)
+    markAttendance({
+      programId: input.programId,
+      personId: input.personId,
+      status: 'present',
+      timestamp: updated.issuedAt,
+      markedByUserId: input.issuedByUserId,
+      tallyId: updated.id,
+    } as any);
+  }
+
+  list[idx] = updated;
+  saveTallies(list);
+
+  return updated;
 }
 
 /**
- * Compute tally report for a program: totals and arrival buckets.
+ * Convenience wrapper to always use next available tally.
  */
-export function getTallyReportForProgram(programId: string): TallyReport {
-  const program = getProgram(programId);
-  if (!program) {
-    throw new Error('Program not found.');
+export function issueNextAvailableTally(
+  programId: string,
+  issuedByUserId: string,
+  personId?: string,
+  checkInSource?: TallyCheckInSource,
+): Tally {
+  return issueTally({
+    programId,
+    issuedByUserId,
+    personId,
+    checkInSource,
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Mapping (check-in / self-service / admin-side)                            */
+/* -------------------------------------------------------------------------- */
+
+export interface MapTallyToPersonInput {
+  programId: string;
+  code: string;
+  personId: string;
+  source: TallyCheckInSource;
+}
+
+/**
+ * Map an issued tally to a person profile.
+ * This step does NOT change arrival time, it only attaches the event to a person.
+ * Attendance is created if not already present for that (program, person).
+ */
+export function mapTallyToPerson(
+  input: MapTallyToPersonInput,
+): Tally {
+  const list = loadTallies();
+  const tally = list.find(
+    (t) =>
+      t.programId === input.programId &&
+      t.code.toUpperCase() === input.code.toUpperCase(),
+  );
+
+  if (!tally) {
+    throw new Error(`No tally with code ${input.code} for this program.`);
   }
 
-  const tallies = getTalliesForProgram(programId);
-  const totalTallies = tallies.length;
-  const issuedCount = tallies.filter((t) => t.status === 'issued' || t.status === 'logged').length;
-  const loggedCount = tallies.filter((t) => t.status === 'logged').length;
-  const arrivalBuckets = bucketizeArrival(program, tallies);
+  if (tally.status !== 'issued' && tally.status !== 'logged') {
+    throw new Error(`Tally ${input.code} cannot be mapped (status: ${tally.status}).`);
+  }
 
-  const report: TallyReport = {
-    programId,
-    totalTallies,
-    issuedCount,
-    loggedCount,
-    arrivalBuckets,
-    generatedAt: nowIso(),
+  const now = new Date().toISOString();
+  const issuedAt = tally.issuedAt ?? now;
+
+  const updated: Tally = {
+    ...tally,
+    personId: input.personId,
+    mappedAt: now,
+    checkInSource: input.source,
+    updatedAt: now,
   };
 
-  return report;
+  // Optionally set status to "logged" to indicate it has been used
+  if (updated.status === 'issued') {
+    updated.status = 'logged';
+  }
+
+  // Create attendance if not already present for that (program, person).
+  // markAttendance will upsert based on (programId, personId).
+  markAttendance({
+    programId: input.programId,
+    personId: input.personId,
+    status: 'present',
+    timestamp: issuedAt,
+    markedByUserId: input.source === 'self-service' ? 'self-service' : 'system',
+    tallyId: updated.id,
+  } as any);
+
+  const idx = list.findIndex((t) => t.id === tally.id);
+  list[idx] = updated;
+  saveTallies(list);
+
+  return updated;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Reports                                                                   */
+/* -------------------------------------------------------------------------- */
+
+import type { TallyProgramStats, TallyArrivalBucket } from '@/types';
+
+export function getProgramTallyStats(programId: string): TallyProgramStats {
+  const tallies = getTalliesForProgram(programId);
+
+  let issuedCount = 0;
+  let mappedCount = 0;
+  let voidCount = 0;
+
+  for (const t of tallies) {
+    if (t.status === 'issued' || t.status === 'logged') {
+      issuedCount += 1;
+    }
+    if (t.personId) {
+      mappedCount += 1;
+    }
+    if (t.status === 'void') {
+      voidCount += 1;
+    }
+  }
+
+  return {
+    programId,
+    totalTallies: tallies.length,
+    issuedCount,
+    mappedCount,
+    voidCount,
+  };
+}
+
+/**
+ * A simple arrival pattern bucketed by hour of day from issuedAt.
+ * It does not depend on program start time (keeps it generic and robust).
+ */
+export function getProgramArrivalBuckets(
+  programId: string,
+): TallyArrivalBucket[] {
+  const tallies = getTalliesForProgram(programId).filter((t) => t.issuedAt);
+
+  const bucketsMap = new Map<string, number>();
+
+  for (const t of tallies) {
+    const d = new Date(t.issuedAt!);
+    if (Number.isNaN(d.getTime())) continue;
+
+    const hour = d.getHours().toString().padStart(2, '0');
+    const label = `${hour}:00 – ${hour}:59`;
+
+    bucketsMap.set(label, (bucketsMap.get(label) ?? 0) + 1);
+  }
+
+  const buckets: TallyArrivalBucket[] = Array.from(bucketsMap.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([label, count]) => ({ label, count }));
+
+  return buckets;
 }
